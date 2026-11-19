@@ -5,12 +5,13 @@ import type { Signer } from "./signer.js";
 import { PolicyEngine } from "@4evergent/policy";
 import { IntentValidator } from "@4evergent/agent-core";
 import { StellarAdapter } from "@4evergent/agent-core";
-import type { AgentIntent, AccountSettingsIntent, PolicyDecision, PolicyRules, ActivityRecord } from "@4evergent/shared";
+import type { AgentIntent, AccountSettingsIntent, PolicyDecision, PolicyRules, ActivityRecord, AgentStatus } from "@4evergent/shared";
 import {
   createActivity,
   createApproval,
   type ActivityStore,
   type ApprovalStore,
+  type AgentStore,
 } from "@4evergent/database";
 
 export interface PipelineOptions {
@@ -26,6 +27,9 @@ export interface PipelineOptions {
   baseFeeStroops?: string;
   /** Shared policy resolver. When provided, pipeline resolves per-agent rules at execution time. */
   policyResolver?: (agentId: string) => Promise<PolicyRules>;
+  /** Optional agent resolver or agent store to check agent status before executing. */
+  agentResolver?: (agentId: string) => Promise<{ status: AgentStatus } | null | undefined>;
+  agentStore?: AgentStore;
 }
 
 export interface PipelineExecuteInput {
@@ -70,6 +74,7 @@ export class TransactionPipeline {
   private approvalTtlSeconds: number;
   private horizonUrl: string;
   private policyResolver?: (agentId: string) => Promise<PolicyRules>;
+  private agentResolver?: (agentId: string) => Promise<{ status: AgentStatus } | null | undefined>;
 
   constructor(options: PipelineOptions) {
     this.builder = new StellarTransactionBuilder(
@@ -83,6 +88,11 @@ export class TransactionPipeline {
     this.approvalStore = options.approvalStore;
     this.approvalTtlSeconds = options.approvalTtlSeconds ?? 86400;
     this.policyResolver = options.policyResolver;
+    if (options.agentResolver) {
+      this.agentResolver = options.agentResolver;
+    } else if (options.agentStore) {
+      this.agentResolver = (agentId: string) => options.agentStore!.get(agentId);
+    }
     // PolicyEngine uses getRules callback for per-agent resolution; falls back to defaultRules
     this.policy = new PolicyEngine(options.policyRules, options.activityStore as any, options.policyResolver);
   }
@@ -111,6 +121,23 @@ export class TransactionPipeline {
 
     const agentId = (sourceAccount as any)?.agentId ?? (sourceAccount as any)?.accountId?.() ?? "unknown";
     const ownerId = (sourceAccount as any)?.ownerId ?? "unknown";
+
+    if (this.agentResolver) {
+      const agent = await this.agentResolver(agentId);
+      if (agent && agent.status !== "active") {
+        const agentStatus = agent.status;
+        if (input.policyDecision) {
+          await this.releaseReservation(agentId, input.policyDecision);
+        }
+        return {
+          status: "rejected",
+          message: `Agent is ${agentStatus}; cannot execute intent`,
+          policyDecision: { result: "deny", reason: `agent is ${agentStatus}`, rule: "agent_status", intent },
+          simulationResult: null,
+          activityId,
+        };
+      }
+    }
     // #353: single evaluation per submission. A caller-supplied decision is
     // used as-is (its evaluation already reserved once); otherwise evaluate
     // once here. Never both.
@@ -419,6 +446,31 @@ export class TransactionPipeline {
         policyDecision: { result: "deny", reason: "expired", rule: "approval", intent: null as any },
         simulationResult: null,
       };
+    }
+
+    // Incident-response boundary: verify agent is active before execution.
+    // An agent paused or disabled after approval must not have its approved intent executed.
+    if (this.agentResolver) {
+      const agent = await this.agentResolver(approval.agentId);
+      if (agent && agent.status !== "active") {
+        const agentStatus = agent.status;
+        const reason = `Agent is ${agentStatus}; approved intent cannot be executed`;
+        await this.approvalStore.update(approvalId, { status: "failed", error: reason });
+        if (approval.activityId) {
+          const existing = await this.activityStore.get(approval.activityId);
+          if (existing) {
+            await this.activityStore.update(approval.activityId, { status: "failed", error: reason });
+          }
+        }
+        await this.releaseApprovalReservation(approval);
+        return {
+          status: "rejected",
+          message: reason,
+          policyDecision: { result: "deny", reason: `agent is ${agentStatus}`, rule: "agent_status", intent: approval.intent },
+          simulationResult: null,
+          activityId: approval.activityId,
+        };
+      }
     }
 
     // CRITICAL: Re-evaluate CURRENT policy at execution time.

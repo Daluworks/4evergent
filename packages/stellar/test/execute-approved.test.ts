@@ -48,6 +48,7 @@ async function createFixture(options: {
   maxTxAmount?: string;
   intentAmount?: string;
   policyResolver?: (agentId: string) => Promise<PolicyRules>;
+  agentResolver?: (agentId: string) => Promise<{ status: import("@4evergent/shared").AgentStatus } | null | undefined>;
   submit?: () => Promise<{ hash: string; ledger: number }>;
 } = {}) {
   const activityStore = new InMemoryActivityStore();
@@ -93,6 +94,7 @@ async function createFixture(options: {
       txTypeRestrictions: { payment: true },
     },
     policyResolver: options.policyResolver,
+    agentResolver: options.agentResolver,
   });
 
   const internals = pipeline as unknown as {
@@ -287,5 +289,45 @@ test("executeApproved invokes onBeforeSubmit before submitting (#275)", async ()
 
     assert.equal(result.status, "submitted");
     assert.equal(beforeSubmitCalls, 1);
+  });
+});
+
+test("executeApproved rejects and marks approval failed when agent is paused", async () => {
+  await withOfflineAccount(async () => {
+    const fixture = await createFixture({
+      agentResolver: async () => ({ status: "paused" }),
+    });
+    const result = await fixture.pipeline.executeApproved(fixture.approval.id, "reviewer-1");
+
+    assert.equal(result.status, "rejected");
+    assert.match(result.message, /Agent is paused; approved intent cannot be executed/);
+    assert.equal(fixture.signer.calls, 0);
+
+    const savedApproval = await fixture.approvalStore.get(fixture.approval.id);
+    assert.equal(savedApproval?.status, "failed");
+    assert.match(savedApproval?.error ?? "", /Agent is paused/);
+
+    const savedActivity = await fixture.activityStore.get(fixture.activity.id);
+    assert.equal(savedActivity?.status, "failed");
+  });
+});
+
+test("executeApproved rejects and marks approval failed when agent is disabled", async () => {
+  await withOfflineAccount(async () => {
+    const fixture = await createFixture({
+      agentResolver: async () => ({ status: "disabled" }),
+    });
+    const result = await fixture.pipeline.executeApproved(fixture.approval.id, "reviewer-1");
+
+    assert.equal(result.status, "rejected");
+    assert.match(result.message, /Agent is disabled; approved intent cannot be executed/);
+    assert.equal(fixture.signer.calls, 0);
+
+    const savedApproval = await fixture.approvalStore.get(fixture.approval.id);
+    assert.equal(savedApproval?.status, "failed");
+    assert.match(savedApproval?.error ?? "", /Agent is disabled/);
+
+    const savedActivity = await fixture.activityStore.get(fixture.activity.id);
+    assert.equal(savedActivity?.status, "failed");
   });
 });
