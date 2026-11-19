@@ -41,6 +41,7 @@ export interface ActivityStore {
   getDailySpending(agentId: string, asset: string, now?: Date): Promise<number | null>;
   /** Remove at most `limit` rows with a UTC day earlier than cutoffDay. */
   sweepDailySpending(cutoffDay: string, limit?: number): Promise<number>;
+  close?(): void;
 }
 
 /**
@@ -81,6 +82,7 @@ export interface ApprovalStore {
    * conditional UPDATE ... WHERE status = ? statement.
    */
   updateIfStatus(id: string, expectedStatus: ApprovalStatus, patch: Partial<ApprovalRecord>): Promise<ApprovalRecord | null>;
+  close?(): void;
 }
 
 export type ApprovalStatus =
@@ -276,6 +278,8 @@ export class InMemoryActivityStore implements ActivityStore {
     this.records.set(id, updated);
     return updated;
   }
+
+  close(): void {}
 }
 
 /**
@@ -353,6 +357,8 @@ export class InMemoryApprovalStore implements ApprovalStore {
     this.records.set(id, updated);
     return updated;
   }
+
+  close(): void {}
 }
 
 /**
@@ -520,6 +526,7 @@ export {
   setSchemaVersion,
   closeSharedConnection,
   closeAllSharedConnections,
+  getSharedConnectionRefCount,
 } from "./shared-connection.js";
 
 // Pagination bounds (shared by every list* store method)
