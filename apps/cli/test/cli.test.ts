@@ -1226,11 +1226,21 @@ test("buildIntentArgs: payment happy path (with and without memo) and missing-ar
     reason: "invoice-1",
   });
 
-  const withMemo = buildIntentArgs(["payment", "USDC", "100", "GDEST", "payroll", "memo-42"]);
+  const withMemo = buildIntentArgs([
+    "payment",
+    "USDC",
+    "100",
+    "GDEST",
+    "payroll",
+    "memo-42",
+    "--issuer",
+    VALID_ISSUER,
+  ]);
   assert.equal(withMemo.error, undefined);
   assert.deepEqual(withMemo.intent, {
     type: "payment",
     asset: "USDC",
+    assetDetails: { code: "USDC", issuer: VALID_ISSUER },
     destination: "GDEST",
     amount: "100",
     reason: "payroll",
@@ -1698,4 +1708,141 @@ test("Handler error paths: non-2xx on schedule command, invalid JSON in contract
   assert.equal((await runHandlerWithMockFetch([], (m) => m.cmdAgentCreate([]))).code, 1);
   assert.equal((await runHandlerWithMockFetch([], (m) => m.cmdIntentSubmit("", [], null))).code, 1);
 });
+
+// ===== Payment issuer support (non-native assets) =====
+
+const VALID_ISSUER = "GDI73WJ4SX7LOG3XZDJC3KCK6ED6E5NBYK2JUBQSPBCNNWEG3ZN7T75U";
+const VALID_DEST = "GBDMPFEAZOQW7XVTAVPXBT7PPA4ZZW7ZFJW5KJNBYRPJ35H6ASW4ASE3";
+
+test("CLI: intent submit USDC payment with --issuer emits assetDetails", () => {
+  const r = run(
+    ["intent", "submit", "agent-1", "payment", "USDC", "25", VALID_DEST, "invoice payout", "--issuer", VALID_ISSUER],
+    {
+      responses: [
+        { match: "/agents/agent-1/intents", status: 202, body: { activityId: "act-usdc", agentId: "agent-1", status: "requires_approval", approvalId: "ap-usdc" } },
+      ],
+    }
+  );
+  assert.equal(r.code, 0);
+  assert.equal(r.requests.length, 1);
+  assert.equal(r.requests[0]!.method, "POST");
+  assert.equal(r.requests[0]!.path, "/agents/agent-1/intents");
+  assert.deepEqual(r.requests[0]!.body, {
+    type: "payment",
+    asset: "USDC",
+    assetDetails: { code: "USDC", issuer: VALID_ISSUER },
+    destination: VALID_DEST,
+    amount: "25",
+    reason: "invoice payout",
+  });
+});
+
+test("CLI: intent submit USDC payment with --idempotency-key before --issuer preserves both", () => {
+  const r = run(
+    ["intent", "submit", "agent-1", "payment", "USDC", "10", VALID_DEST, "payout", "memo-1", "--idempotency-key", "key-usdc", `--issuer=${VALID_ISSUER}`],
+    {
+      responses: [
+        { match: "/agents/agent-1/intents", status: 202, body: { activityId: "act-usdc-2", agentId: "agent-1", status: "queued" } },
+      ],
+    }
+  );
+  assert.equal(r.code, 0);
+  assert.equal(r.requests.length, 1);
+  assert.equal(r.requests[0]!.headers["Idempotency-Key"], "key-usdc");
+  assert.deepEqual(r.requests[0]!.body, {
+    type: "payment",
+    asset: "USDC",
+    assetDetails: { code: "USDC", issuer: VALID_ISSUER },
+    destination: VALID_DEST,
+    amount: "10",
+    reason: "payout",
+    memo: "memo-1",
+  });
+});
+
+test("CLI: intent submit XLM payment does not emit assetDetails", () => {
+  const r = run(
+    ["intent", "submit", "agent-1", "payment", "XLM", "10", VALID_DEST, "native payout"],
+    {
+      responses: [
+        { match: "/agents/agent-1/intents", status: 202, body: { activityId: "act-xlm", agentId: "agent-1", status: "queued" } },
+      ],
+    }
+  );
+  assert.equal(r.code, 0);
+  assert.equal(r.requests.length, 1);
+  assert.equal("assetDetails" in r.requests[0]!.body, false);
+  assert.deepEqual(r.requests[0]!.body, {
+    type: "payment",
+    asset: "XLM",
+    destination: VALID_DEST,
+    amount: "10",
+    reason: "native payout",
+  });
+});
+
+test("CLI: intent submit XLM payment with --issuer is rejected client-side", () => {
+  const r = run(
+    ["intent", "submit", "agent-1", "payment", "XLM", "10", VALID_DEST, "native payout", "--issuer", VALID_ISSUER]
+  );
+  assert.equal(r.code, 1);
+  assert.equal(r.requests.length, 0);
+  assert.match(r.stderr, /--issuer.*XLM/i);
+});
+
+test("CLI: intent submit non-native payment without --issuer is rejected client-side before API call", () => {
+  const r = run(
+    ["intent", "submit", "agent-1", "payment", "USDC", "25", VALID_DEST, "missing issuer"]
+  );
+  assert.equal(r.code, 1);
+  assert.equal(r.requests.length, 0);
+  assert.match(r.stderr, /issuer/i);
+  assert.match(r.stderr, /USDC/);
+});
+
+test("CLI: intent submit non-native payment with invalid --issuer is rejected client-side", () => {
+  const r = run(
+    ["intent", "submit", "agent-1", "payment", "USDC", "25", VALID_DEST, "bad issuer", "--issuer", "not-a-stellar-address"]
+  );
+  assert.equal(r.code, 1);
+  assert.equal(r.requests.length, 0);
+  assert.match(r.stderr, /invalid --issuer/i);
+});
+
+test("CLI: schedule create USDC payment with --issuer emits assetDetails", () => {
+  const r = run(
+    ["schedule", "create", "agent-1", "0 12 * * *", "payment", "USDC", "50", VALID_DEST, "daily usdc", "--issuer", VALID_ISSUER, "--timezone", "UTC"],
+    {
+      responses: [
+        { match: "/agents/agent-1/schedules", status: 201, body: { schedule: { id: "sch-usdc", agentId: "agent-1", scheduleExpression: "0 12 * * *", timezone: "UTC", nextRunAt: "2026-01-01T12:00:00Z" } } },
+      ],
+    }
+  );
+  assert.equal(r.code, 0);
+  assert.equal(r.requests.length, 1);
+  assert.deepEqual(r.requests[0]!.body.intent, {
+    type: "payment",
+    asset: "USDC",
+    assetDetails: { code: "USDC", issuer: VALID_ISSUER },
+    destination: VALID_DEST,
+    amount: "50",
+    reason: "daily usdc",
+  });
+});
+
+test("CLI: schedule create non-native payment without --issuer is rejected client-side", () => {
+  const r = run(
+    ["schedule", "create", "agent-1", "0 12 * * *", "payment", "USDC", "50", VALID_DEST, "daily usdc"]
+  );
+  assert.equal(r.code, 1);
+  assert.equal(r.requests.length, 0);
+  assert.match(r.stderr, /issuer/i);
+});
+
+test("CLI: --help documents --issuer option", () => {
+  const r = run(["--help"]);
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /--issuer/);
+});
+
 
