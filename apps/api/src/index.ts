@@ -1509,35 +1509,67 @@ export async function createApiServer(options: ServerOptions) {
     const schedule = await schedules.get(scheduleId);
     if (!schedule) return apiError(res, "SCHEDULE_NOT_FOUND");
 
-    // Reject any body that contains fields other than the one accepted field.
-    // A PATCH that sends {"cronExpression":"..."} or {"amount":"5"} looks like
-    // success from the caller's perspective but changes nothing — a silent lie.
+    // Reject any body that contains unknown top-level fields.
     // Unknown keys are named in the error so the caller can self-correct.
-    const ACCEPTED_FIELDS = new Set(["scheduleExpression"]);
-    const bodyKeys = body !== null && typeof body === "object" ? Object.keys(body) : [];
+    const ACCEPTED_FIELDS = new Set(["scheduleExpression", "timezone", "intent"]);
+    const bodyObj = body !== null && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
+    const bodyKeys = Object.keys(bodyObj);
     const unknownKeys = bodyKeys.filter((k) => !ACCEPTED_FIELDS.has(k));
     if (unknownKeys.length > 0) {
       return apiError(res, "VALIDATION_ERROR", {
-        message: `unknown field(s): ${unknownKeys.join(", ")}; accepted field: scheduleExpression`,
+        message: `unknown field(s): ${unknownKeys.join(", ")}; accepted fields: scheduleExpression, timezone, intent`,
       });
     }
 
-    // An empty body or a body with no recognized field carries no update — reject
-    // rather than bumping updatedAt for a no-op.
-    if (!bodyKeys.includes("scheduleExpression")) {
+    // An empty body carries no update — reject rather than bumping updatedAt for a no-op.
+    if (bodyKeys.length === 0) {
       return apiError(res, "VALIDATION_ERROR", {
-        message: "body must include scheduleExpression; no other fields are accepted",
+        message: "body must include at least one of: scheduleExpression, timezone, intent",
       });
     }
 
-    const { validateScheduleExpression } = await import("@4evergent/database");
-    const result = validateScheduleExpression((body as any).scheduleExpression, schedule.timezone);
-    if (!result.valid) return apiError(res, "VALIDATION_ERROR", { message: result.error });
+    const { validateScheduleExpression, validateScheduleIntent } = await import("@4evergent/database");
+    const patch: Partial<ScheduleRecord> = {};
 
-    const patch: Partial<ScheduleRecord> = {
-      scheduleExpression: (body as any).scheduleExpression,
-      nextRunAt: result.nextRunAt ?? schedule.nextRunAt,
-    };
+    if (bodyObj.intent !== undefined) {
+      if (typeof bodyObj.intent !== "object" || bodyObj.intent === null || Array.isArray(bodyObj.intent)) {
+        return apiError(res, "VALIDATION_ERROR", { message: "intent must be an object" });
+      }
+      const incomingIntent = bodyObj.intent as Record<string, unknown>;
+      const mergedIntent: Record<string, unknown> = {
+        ...schedule.intent,
+        ...incomingIntent,
+      };
+      if (mergedIntent.asset === "XLM" && incomingIntent.assetDetails === undefined) {
+        delete mergedIntent.assetDetails;
+      }
+      const intentValidation = validateScheduleIntent(mergedIntent as any);
+      if (!intentValidation.valid) {
+        return apiError(res, "VALIDATION_ERROR", { message: intentValidation.error });
+      }
+      patch.intent = mergedIntent as any;
+    }
+
+    if (bodyObj.scheduleExpression !== undefined || bodyObj.timezone !== undefined) {
+      const nextExpression =
+        bodyObj.scheduleExpression !== undefined
+          ? (bodyObj.scheduleExpression as string)
+          : schedule.scheduleExpression;
+      const nextTimezone =
+        bodyObj.timezone !== undefined
+          ? (bodyObj.timezone as string)
+          : schedule.timezone;
+      const result = validateScheduleExpression(nextExpression, nextTimezone);
+      if (!result.valid) return apiError(res, "VALIDATION_ERROR", { message: result.error });
+
+      if (bodyObj.scheduleExpression !== undefined) {
+        patch.scheduleExpression = nextExpression;
+      }
+      if (bodyObj.timezone !== undefined) {
+        patch.timezone = nextTimezone;
+      }
+      patch.nextRunAt = result.nextRunAt ?? schedule.nextRunAt;
+    }
 
     const updated = await schedules.update(scheduleId, patch);
     return json(res, { schedule: updated });
