@@ -39,6 +39,8 @@ import {
   assertNoSecrets,
   validateApprovalTransition,
   ResourceAuthorizationService,
+  classifyPipelineOutcome,
+  classifyError,
   type AuthorizationContext,
   type ActivityStore,
   type ApprovalStore,
@@ -574,7 +576,7 @@ export async function createApiServer(options: ServerOptions) {
             success: outcome.status === "submitted",
             status: outcome.status,
             error: outcome.message,
-            errorClass: outcome.status === "rejected" ? "permanent" as const : "transient" as const,
+            errorClass: classifyPipelineOutcome(outcome),
             txHash,
             submittedHash: txHash ?? null,
             activityId: (outcome as { activityId?: string }).activityId ?? record.activityId ?? undefined,
@@ -613,7 +615,7 @@ export async function createApiServer(options: ServerOptions) {
             success: false,
             status: "failed",
             error: err instanceof Error ? err.message : String(err),
-            errorClass: "transient" as const,
+            errorClass: classifyError(err),
             activityId: record.activityId ?? undefined,
           };
         }
