@@ -71,4 +71,18 @@ describe('ApprovalDetail', () => {
       expect(screen.getByText('Approval not found')).toBeInTheDocument();
     });
   });
+
+  it('does not offer approve/reject buttons for an expired approval', async () => {
+    const expired = {
+      ...makeApproval(),
+      expiresAt: new Date(Date.now() - 3600_000).toISOString(),
+    };
+    mockApi.approvalDetail.mockResolvedValue({ approval: expired });
+    renderDetail();
+    await waitFor(() => {
+      expect(screen.getByText(/Approval/i)).toBeInTheDocument();
+    });
+    expect(screen.queryByRole('button', { name: /approve/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /reject/i })).not.toBeInTheDocument();
+  });
 });
