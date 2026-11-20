@@ -1,5 +1,5 @@
 import type { ExecutionRecord, ExecutionStore, RetryPolicy } from "@4evergent/database";
-import { computeNextRetryAt, DEFAULT_RETRY_POLICY } from "@4evergent/database";
+import { classifyError, computeNextRetryAt, DEFAULT_RETRY_POLICY } from "@4evergent/database";
 
 export interface ExecutionResult {
   record: ExecutionRecord;
@@ -346,7 +346,7 @@ export class ExecutionQueue {
         return true;
       }
       // Classify the error (transient vs permanent) for retry decision
-      const errorClass = classifyUncaughtError(err);
+      const errorClass = classifyError(err);
       await this.fail(record, err, errorClass);
       return true;
     } finally {
@@ -415,7 +415,7 @@ export class ExecutionQueue {
     }
 
     const message = error instanceof Error ? error.message : String(error);
-    const classification = errorClass ?? classifyUncaughtError(error);
+    const classification = errorClass ?? classifyError(error);
     const attempt = record.attempt + 1;
 
     // Update attempt count on the record
@@ -526,37 +526,6 @@ export interface ExecutionQueueOptions {
   retryPolicy?: RetryPolicy;
   /** Pre-check function to verify transaction status before blind retry */
   preCheck?: PreCheckFn;
-}
-
-function classifyUncaughtError(error: unknown): "transient" | "permanent" {
-  if (error instanceof Error) {
-    return isTransientMessage(error.message) ? ("transient" as const) : ("permanent" as const);
-  }
-  return "transient" as const;
-}
-
-const TRANSIENT_PATTERNS: (string | RegExp)[] = [
-  /network/i,
-  /fetch/i,
-  /timeout/i,
-  /econnreset/i,
-  /econnrefused/i,
-  /enotfound/i,
-  /socket/i,
-  /horizon/i,
-  /server error/i,
-  /503/,
-  /429/,
-  /account fetch error/i,
-  /transaction submission failed/i,
-];
-
-function isTransientMessage(message: string): boolean {
-  const lower = message.toLowerCase();
-  return TRANSIENT_PATTERNS.some((p) => {
-    if (typeof p === "string") return lower.includes(p);
-    return p.test(lower);
-  });
 }
 
 function shouldRetryNow(
