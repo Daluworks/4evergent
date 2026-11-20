@@ -427,3 +427,113 @@ test("PATCH scheduleExpression → scheduler runs at NEW time, not old", async (
     await close();
   }
 });
+
+// ===== TEST 12: UPDATE INTENT AMOUNT LEAVES nextRunAt UNCHANGED AND PRESERVES HISTORY =====
+test("PATCH /agents/:id/schedules/:id — updating intent.amount persists, leaves nextRunAt unchanged, preserves lastRunAt and createdAt", async () => {
+  const store = new InMemoryScheduleStore();
+  const schedule = makeSchedule({
+    scheduleExpression: "0 * * * *",
+    nextRunAt: "2099-01-01T00:00:00Z",
+    lastRunAt: "2025-12-31T23:00:00Z",
+    createdAt: "2025-01-01T00:00:00Z",
+  });
+  await store.create(schedule);
+
+  const { baseUrl, close, scheduleStore } = await startServer({ scheduleStore: store, policyRules: { maxTxAmount: { XLM: "1000" } }, deferExecution: true });
+
+  try {
+    const res = await patchSchedule(baseUrl, "test-agent", schedule.id, {
+      intent: { amount: "20" },
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.schedule.intent.amount, "20");
+    assert.equal(res.body.schedule.intent.asset, schedule.intent.asset);
+    assert.equal(res.body.schedule.intent.destination, schedule.intent.destination);
+    assert.equal(res.body.schedule.intent.reason, schedule.intent.reason);
+    assert.equal(res.body.schedule.nextRunAt, "2099-01-01T00:00:00Z");
+    assert.equal(res.body.schedule.lastRunAt, "2025-12-31T23:00:00Z");
+    assert.equal(res.body.schedule.createdAt, "2025-01-01T00:00:00Z");
+
+    const after = await scheduleStore.get(schedule.id);
+    assert.equal(after?.intent.amount, "20");
+    assert.equal(after?.nextRunAt, "2099-01-01T00:00:00Z");
+    assert.equal(after?.lastRunAt, "2025-12-31T23:00:00Z");
+    assert.equal(after?.createdAt, "2025-01-01T00:00:00Z");
+  } finally {
+    await close();
+  }
+});
+
+// ===== TEST 13: UPDATE TIMEZONE RECOMPUTES nextRunAt =====
+test("PATCH /agents/:id/schedules/:id — updating timezone persists and recomputes nextRunAt", async () => {
+  const store = new InMemoryScheduleStore();
+  const schedule = makeSchedule({
+    scheduleExpression: "0 12 * * *",
+    timezone: "UTC",
+    nextRunAt: "2099-01-01T00:00:00Z",
+    lastRunAt: "2025-12-31T12:00:00Z",
+  });
+  await store.create(schedule);
+
+  const { baseUrl, close, scheduleStore } = await startServer({ scheduleStore: store, policyRules: { maxTxAmount: { XLM: "1000" } }, deferExecution: true });
+
+  try {
+    const res = await patchSchedule(baseUrl, "test-agent", schedule.id, {
+      timezone: "America/New_York",
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.schedule.timezone, "America/New_York");
+    assert.notEqual(res.body.schedule.nextRunAt, "2099-01-01T00:00:00Z");
+    assert.equal(res.body.schedule.lastRunAt, "2025-12-31T12:00:00Z");
+
+    const after = await scheduleStore.get(schedule.id);
+    assert.equal(after?.timezone, "America/New_York");
+    assert.notEqual(after?.nextRunAt, "2099-01-01T00:00:00Z");
+  } finally {
+    await close();
+  }
+});
+
+// ===== TEST 14: INVALID AMOUNT, DESTINATION, AND TIMEZONE REJECTED =====
+test("PATCH /agents/:id/schedules/:id — invalid amount, destination, or timezone returns 400 and does not mutate", async () => {
+  const store = new InMemoryScheduleStore();
+  const schedule = makeSchedule({
+    scheduleExpression: "0 * * * *",
+    timezone: "UTC",
+    nextRunAt: "2099-01-01T00:00:00Z",
+  });
+  await store.create(schedule);
+
+  const { baseUrl, close, scheduleStore } = await startServer({ scheduleStore: store, policyRules: { maxTxAmount: { XLM: "1000" } }, deferExecution: true });
+
+  try {
+    // Invalid amount
+    const badAmount = await patchSchedule(baseUrl, "test-agent", schedule.id, {
+      intent: { amount: "-5" },
+    });
+    assert.equal(badAmount.status, 400);
+    assert.equal(badAmount.body.code, "VALIDATION_ERROR");
+
+    // Invalid destination
+    const badDest = await patchSchedule(baseUrl, "test-agent", schedule.id, {
+      intent: { destination: "not-a-stellar-address" },
+    });
+    assert.equal(badDest.status, 400);
+    assert.equal(badDest.body.code, "VALIDATION_ERROR");
+
+    // Invalid timezone
+    const badTz = await patchSchedule(baseUrl, "test-agent", schedule.id, {
+      timezone: "Mars/Olympus_Mons",
+    });
+    assert.equal(badTz.status, 400);
+    assert.equal(badTz.body.code, "VALIDATION_ERROR");
+
+    const after = await scheduleStore.get(schedule.id);
+    assert.equal(after?.intent.amount, "10");
+    assert.equal(after?.intent.destination, schedule.intent.destination);
+    assert.equal(after?.timezone, "UTC");
+    assert.equal(after?.updatedAt, schedule.updatedAt);
+  } finally {
+    await close();
+  }
+});
