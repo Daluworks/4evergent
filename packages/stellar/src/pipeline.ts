@@ -437,7 +437,32 @@ export class TransactionPipeline {
     // approval the operator may already have acted on and risks a duplicate
     // submission. The deny/allowlist reason is stored in approval.error and
     // the linked activity error so it surfaces in the API response.
-    const currentDecision = await this.policy.evaluate(approval.intent, approval.agentId, { skipReservation: true, skipApprovalThreshold: true });
+    // #373: When an approval is executed on a later UTC day than it was created,
+    // the submission day's reservation must be released and the execution day's
+    // daily limit must be atomically checked and reserved.
+    const execNow = new Date();
+    const executionDay = new Date(Date.UTC(execNow.getUTCFullYear(), execNow.getUTCMonth(), execNow.getUTCDate()))
+      .toISOString()
+      .slice(0, 10);
+    const submissionTimestamp = approval.requestedAt || approval.createdAt;
+    const submissionDate = submissionTimestamp ? new Date(submissionTimestamp) : execNow;
+    const submissionDay = new Date(Date.UTC(submissionDate.getUTCFullYear(), submissionDate.getUTCMonth(), submissionDate.getUTCDate()))
+      .toISOString()
+      .slice(0, 10);
+    const crossedMidnight = submissionDay !== executionDay;
+
+    if (crossedMidnight) {
+      await this.releaseApprovalReservation(approval, submissionDate);
+    }
+
+    const currentDecision = await this.policy.evaluate(approval.intent, approval.agentId, {
+      skipReservation: !crossedMidnight,
+      skipApprovalThreshold: true,
+    });
+    if (crossedMidnight && currentDecision.reservedDailySpending) {
+      approval.policyDecision = currentDecision;
+      approval.requestedAt = execNow.toISOString();
+    }
     if (currentDecision.result !== "allow") {
       const reason = `Policy re-evaluation did not allow execution: ${currentDecision.reason} (rule: ${currentDecision.rule})`;
       await this.approvalStore.update(approvalId, { status: "failed", error: reason });
@@ -447,9 +472,11 @@ export class TransactionPipeline {
           await this.activityStore.update(approval.activityId, { status: "failed", error: reason });
         }
       }
-      // #353: failed approval will never execute — release the reservation
-      // made when the intent was created.
-      await this.releaseApprovalReservation(approval);
+      // #353 / #373: failed approval will never execute — release any active
+      // reservation (on the same day if not crossed, or if currentDecision reserved).
+      if (!crossedMidnight || currentDecision.reservedDailySpending) {
+        await this.releaseApprovalReservation(approval);
+      }
       return {
         status: "rejected",
         message: reason,
@@ -611,22 +638,29 @@ export class TransactionPipeline {
    * an unknown state (the transaction may have landed), so the reservation
    * is conservatively kept.
    */
-  private async releaseReservation(agentId: string, decision: PolicyDecision | null | undefined): Promise<void> {
+  private async releaseReservation(agentId: string, decision: PolicyDecision | null | undefined, atDate?: Date): Promise<void> {
     const reserved = decision?.reservedDailySpending;
     if (!reserved || !this.activityStore?.releaseDailySpending) return;
     try {
-      await this.activityStore.releaseDailySpending(agentId, reserved.asset, reserved.amount);
+      await this.activityStore.releaseDailySpending(agentId, reserved.asset, reserved.amount, atDate);
     } catch {
       // Best-effort bookkeeping — see above.
     }
   }
 
   /** Release the reservation made when the approval's intent was created. */
-  private async releaseApprovalReservation(approval: {
-    agentId: string;
-    policyDecision: PolicyDecision;
-  }): Promise<void> {
-    await this.releaseReservation(approval.agentId, approval.policyDecision);
+  private async releaseApprovalReservation(
+    approval: {
+      agentId: string;
+      policyDecision: PolicyDecision;
+      requestedAt?: string;
+      createdAt?: string;
+    },
+    atDate?: Date
+  ): Promise<void> {
+    const ts = approval.requestedAt || approval.createdAt;
+    const effectiveDate = atDate ?? (ts ? new Date(ts) : undefined);
+    await this.releaseReservation(approval.agentId, approval.policyDecision, effectiveDate);
   }
 
   /**
