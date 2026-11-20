@@ -458,15 +458,15 @@ for (const backend of BACKENDS) {
           result: "requires_approval",
           reason: "Requires human approval",
           rule: "approvalThreshold",
-          intent: PAYMENT_300,
+          intent: intent,
           reservedDailySpending: { asset: "XLM", amount: "300" },
         };
-        const activity = createActivity("agent-1", "owner-1", PAYMENT_300, decision);
+        const activity = createActivity("agent-1", "owner-1", intent, decision);
         activity.createdAt = yesterday.toISOString();
         activity.updatedAt = yesterday.toISOString();
         await activityStore.record(activity);
 
-        const approval = createApproval(activity.id, "agent-1", "owner-1", PAYMENT_300, decision, null);
+        const approval = createApproval(activity.id, "agent-1", "owner-1", intent, decision, null);
         approval.status = "approved";
         approval.requestedAt = yesterday.toISOString();
         approval.createdAt = yesterday.toISOString();
@@ -490,10 +490,10 @@ for (const backend of BACKENDS) {
 
         // A second cross-midnight approval of 300 XLM against the 500 XLM daily limit on today must be denied
         await activityStore.reserveDailySpending("agent-1", "XLM", "300", "500", yesterday);
-        const activity2 = createActivity("agent-1", "owner-1", PAYMENT_300, decision);
+        const activity2 = createActivity("agent-1", "owner-1", intent, decision);
         activity2.createdAt = yesterday.toISOString();
         await activityStore.record(activity2);
-        const approval2 = createApproval(activity2.id, "agent-1", "owner-1", PAYMENT_300, decision, null);
+        const approval2 = createApproval(activity2.id, "agent-1", "owner-1", intent, decision, null);
         approval2.status = "approved";
         approval2.requestedAt = yesterday.toISOString();
         approval2.createdAt = yesterday.toISOString();
