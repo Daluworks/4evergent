@@ -806,13 +806,17 @@ export async function createApiServer(options: ServerOptions) {
       try {
         const result = await sweepRetainedData({
           store,
+          approvalStore: approvals,
           authModule,
           now: Date.now(),
           authSessionDays: sessionDays,
           dailySpendingDays: spendingDays,
           batchSize: 500,
+          onApprovalExpired: async (approval) => {
+            await releaseDecisionReservation(approval.agentId, approval.policyDecision);
+          },
         });
-        console.log(`[retention] sweep complete: auth_sessions=${result.authSessionsRemoved}, daily_spending=${result.dailySpendingRemoved}`);
+        console.log(`[retention] sweep complete: auth_sessions=${result.authSessionsRemoved}, daily_spending=${result.dailySpendingRemoved}, expired_approvals=${result.expiredApprovalsSwept}`);
       } catch (err) {
         console.error("[retention] sweep failed:", err);
       } finally {
@@ -1931,17 +1935,19 @@ export async function createApiServer(options: ServerOptions) {
     const canApprove = await authorizationService.canApprove(ctx, approvalId);
     if (!canApprove) return approvalError(res, "APPROVAL_NOT_FOUND", { approvalId, activityId: "", status: "rejected", message: "approval not found" });
 
+    if (approval.status === "expired" || (approval.expiresAt && new Date(approval.expiresAt) < new Date())) {
+      if (approval.status !== "expired") {
+        await approvals.update(approvalId, { status: "expired", expiredAt: new Date().toISOString() });
+        // #353: expired approval will never execute — release the reservation
+        // made when the intent was created.
+        await releaseDecisionReservation(approval.agentId, approval.policyDecision);
+      }
+      return approvalError(res, "APPROVAL_EXPIRED", { approvalId, activityId: approval.activityId, status: "expired", message: "approval expired" });
+    }
+
     const transitionError = validateApprovalTransition(approval.status, "approved");
     if (transitionError) {
       return approvalError(res, "APPROVAL_INVALID_STATE", { approvalId, activityId: approval.activityId, status: approval.status, message: `cannot approve: ${transitionError}` });
-    }
-
-    if (approval.expiresAt && new Date(approval.expiresAt) < new Date()) {
-      await approvals.update(approvalId, { status: "expired", expiredAt: new Date().toISOString() });
-      // #353: expired approval will never execute — release the reservation
-      // made when the intent was created.
-      await releaseDecisionReservation(approval.agentId, approval.policyDecision);
-      return approvalError(res, "APPROVAL_EXPIRED", { approvalId, activityId: approval.activityId, status: "expired", message: "approval expired" });
     }
 
     // Atomic claim: pending_approval → approved in one conditional step.
@@ -2021,6 +2027,14 @@ export async function createApiServer(options: ServerOptions) {
 
     const canReject = await authorizationService.canReject(ctx, approvalId);
     if (!canReject) return approvalError(res, "APPROVAL_NOT_FOUND", { approvalId, activityId: "", status: "rejected", message: "approval not found" });
+
+    if (approval.status === "expired" || (approval.expiresAt && new Date(approval.expiresAt) < new Date())) {
+      if (approval.status !== "expired") {
+        await approvals.update(approvalId, { status: "expired", expiredAt: new Date().toISOString() });
+        await releaseDecisionReservation(approval.agentId, approval.policyDecision);
+      }
+      return approvalError(res, "APPROVAL_EXPIRED", { approvalId, activityId: approval.activityId, status: "expired", message: "approval expired" });
+    }
 
     const transitionError = validateApprovalTransition(approval.status, "rejected");
     if (transitionError) {

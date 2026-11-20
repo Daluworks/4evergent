@@ -73,7 +73,8 @@ export default function ApprovalDetail() {
     <EmptyState title="Approval not found" message="This approval does not exist or you do not have access." />
   );
 
-  const isPending = approval.status === 'pending_approval';
+  const isExpired = approval.status === 'expired' || (approval.expiresAt ? new Date(approval.expiresAt) <= new Date() : false);
+  const isPending = approval.status === 'pending_approval' && !isExpired;
   const canApprove = isPending;
   const canReject = isPending;
 
@@ -90,7 +91,7 @@ export default function ApprovalDetail() {
       </div>
 
       <div className="detail-grid">
-        <DetailCard title="Status"><StatusBadge status={approval.status} /></DetailCard>
+        <DetailCard title="Status"><StatusBadge status={isExpired ? 'expired' : approval.status} /></DetailCard>
         <DetailCard title="Agent"><code>{approval.agentId}</code></DetailCard>
         <DetailCard title="Activity"><code>{approval.activityId.slice(0, 8)}</code></DetailCard>
         <DetailCard title="Intent Type">{approval.intent.type}</DetailCard>
