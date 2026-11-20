@@ -329,8 +329,15 @@ export class ExecutionQueue {
         }
         inFlightState.phase = "submitting";
       },
-      onSubmitted: (_txHash) => {
+      onSubmitted: async (txHash) => {
         inFlightState.phase = "submitted";
+        if (txHash) {
+          await this.store.updateIfStatus(record.id, "executing", {
+            txHash,
+            submittedHash: txHash,
+            updatedAt: new Date().toISOString(),
+          });
+        }
       },
     };
 
@@ -418,13 +425,24 @@ export class ExecutionQueue {
     const classification = errorClass ?? classifyUncaughtError(error);
     const attempt = record.attempt + 1;
 
-    // Update attempt count on the record
+    const txHash =
+      typeof extraUpdate?.txHash === "string" && extraUpdate.txHash
+        ? extraUpdate.txHash
+        : null;
+    const submittedHash =
+      typeof extraUpdate?.submittedHash === "string" && extraUpdate.submittedHash
+        ? extraUpdate.submittedHash
+        : txHash;
+
+    // Update attempt count on the record (and persist any hash from the pipeline result)
     await this.store.updateIfStatus(record.id, "executing", {
       attempt,
       error: message,
       errorClass: classification,
       updatedAt: new Date().toISOString(),
       ...(extraUpdate?.activityId ? { activityId: extraUpdate.activityId } : {}),
+      ...(txHash ? { txHash } : {}),
+      ...(submittedHash ? { submittedHash } : {}),
     } as Partial<ExecutionRecord>);
 
     // Decide whether to retry or move to dead_letter
@@ -434,16 +452,18 @@ export class ExecutionQueue {
     let nextRetryAt: string | null = null;
 
     // #378: the pre-check must consult the CURRENT attempt's hash — the
-    // outcome's submittedHash (carried in extraUpdate by complete()) — not
-    // record.submittedHash, which is the pre-execution snapshot. Consulting
+    // outcome's submittedHash (carried in extraUpdate by complete()) or a hash
+    // already persisted by onSubmitted during this attempt (current.submittedHash)
+    // — not record.submittedHash, which is the pre-execution snapshot. Consulting
     // the old hash could dead-letter a new attempt that never submitted
     // anything, just because the previous attempt's transaction was found
     // on-chain. When there is no outcome hash (uncaught-error path), the
     // snapshot is the only hash available and is used as before.
     const currentHash =
-      typeof extraUpdate?.submittedHash === "string"
-        ? (extraUpdate.submittedHash as string)
-        : (record.submittedHash ?? null);
+      submittedHash ??
+      current.submittedHash ??
+      record.submittedHash ??
+      null;
     if (this.preCheck && currentHash) {
       const decision = await this.evaluateRetryWithPreCheck(record, attempt, classification, currentHash);
       shouldRetry = decision.shouldRetry;
