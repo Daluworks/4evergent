@@ -746,7 +746,23 @@ export async function createApiServer(options: ServerOptions) {
               createdAt: now,
               updatedAt: now,
             };
-            void executionQueue.enqueue(executionRecord);
+            try {
+              await executionQueue.enqueue(executionRecord);
+            } catch (err) {
+              console.error(`[scheduler] failed to enqueue execution for schedule ${schedule.id}:`, err);
+              if (store) {
+                try {
+                  await store.update(activityId, {
+                    status: "failed",
+                    error: `Failed to enqueue execution: ${err instanceof Error ? err.message : String(err)}`,
+                    updatedAt: new Date().toISOString(),
+                  });
+                } catch (updateErr) {
+                  console.error(`[scheduler] failed to mark activity ${activityId} failed for schedule ${schedule.id}:`, updateErr);
+                }
+              }
+              throw err;
+            }
             return {
               status: "submitted",
               message: "schedule enqueued for execution",
