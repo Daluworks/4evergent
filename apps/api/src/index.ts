@@ -567,7 +567,7 @@ export async function createApiServer(options: ServerOptions) {
           }
           const txHash = (outcome as { txHash?: string }).txHash;
           if (txHash) {
-            context?.onSubmitted?.(txHash);
+            await context?.onSubmitted?.(txHash);
           }
           return {
             record,
