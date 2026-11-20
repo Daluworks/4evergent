@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { createRequire } from "node:module";
 import { log, generateRequestId, runRequestIdContext } from "./logging.js";
 import type {
   AgentIntent,
@@ -53,10 +54,15 @@ import {
   createActivity,
   isOffsetAtCeiling,
   clampOffset,
+  getSharedConnection,
+  getSchemaVersion,
 } from "@4evergent/database";
 import type { PolicyRules, Agent, RequestContext, AuthorizationService, AuthProvider, AuthenticatedPrincipal } from "@4evergent/shared";
 import { createAuthModule, type PrincipalResolution } from "./auth.js";
 import { sweepRetainedData } from "./data-retention.js";
+
+const require = createRequire(import.meta.url);
+export const API_VERSION: string = (require("../package.json") as { version: string }).version;
 
 const TESTNET_PASSPHRASE = "Test SDF Network ; September 2015";
 
@@ -932,7 +938,15 @@ export async function createApiServer(options: ServerOptions) {
     return als.run(requestScopedCtx, () => {
       // Health check is public
       if (method === "GET" && url === "/health") {
-        return json(res, { status: "ok", signerAccountId: options.signer.getAccountId() });
+        const schemaVersion = options.dbPath
+          ? getSchemaVersion(getSharedConnection(options.dbPath))
+          : null;
+        return json(res, {
+          status: "ok",
+          signerAccountId: options.signer.getAccountId(),
+          version: API_VERSION,
+          schemaVersion,
+        });
       }
 
       // Public readiness: bounded/cached dependency reads, fresh worker status.
