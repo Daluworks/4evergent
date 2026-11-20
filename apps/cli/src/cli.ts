@@ -755,9 +755,22 @@ async function cmdAgentCreate(args: string[]) {
   }
 }
 
+const RECOGNIZED_POLICY_FIELDS = [
+  "maxTxAmount",
+  "dailySpendingLimit",
+  "allowedAssets",
+  "allowedDestinations",
+  "allowedContractIds",
+  "txTypeRestrictions",
+  "approvalThreshold",
+  "requireHumanApprovalForAmountAbove",
+] as const;
+
 async function cmdPolicyUpdate(agentId: string, args: string[]) {
   if (!agentId) {
     console.error("Usage: 4evergent policy update <agent-id> --rules '<json>'");
+    console.error(`  --rules must be a JSON object with at least one policy field: ${RECOGNIZED_POLICY_FIELDS.join(", ")}`);
+    console.error("  Note: pass the inner 'policy' object, not the 'policy get' envelope ({ agentId, policy, version, updatedAt }).");
     return 1;
   }
   const idx = args.indexOf("--rules");
@@ -773,13 +786,34 @@ async function cmdPolicyUpdate(agentId: string, args: string[]) {
     return 1;
   }
 
+  if (typeof policy !== "object" || policy === null || Array.isArray(policy)) {
+    console.error(`Error: --rules must be a JSON object containing at least one recognized policy field (${RECOGNIZED_POLICY_FIELDS.join(", ")})`);
+    return 1;
+  }
+
+  const hasRecognizedField = RECOGNIZED_POLICY_FIELDS.some((field) => Object.prototype.hasOwnProperty.call(policy, field));
+  if (!hasRecognizedField) {
+    if (typeof policy.policy === "object" && policy.policy !== null && !Array.isArray(policy.policy)) {
+      console.error(
+        "Error: --rules appears to be a 'policy get' envelope ({ agentId, policy, version, updatedAt }). " +
+          "Pass the inner 'policy' object instead."
+      );
+      return 1;
+    }
+    console.error(
+      `Error: --rules contains no recognized policy fields. ` +
+        `Expected at least one of: ${RECOGNIZED_POLICY_FIELDS.join(", ")}`
+    );
+    return 1;
+  }
+
   try {
     const { body } = await request(`/agents/${encodeURIComponent(agentId)}/policy`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(policy),
     });
-    console.log(`Policy updated:\n  Agent: ${body.agentId}\n  Version: ${body.version}`);
+    console.log(`Policy updated:\n${formatPolicy(body)}`);
     return 0;
   } catch (err: any) {
     console.error(`Error: ${err.message}`);

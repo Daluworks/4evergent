@@ -850,6 +850,80 @@ test("CLI v3: policy update → 404 → exit 1", () => {
   assert.match(r.stderr, /404/);
 });
 
+test("CLI v3: policy update → empty {} rejected without sending request", () => {
+  const r = run(["policy", "update", "agent-1", "--rules", "{}"], {
+    responses: [
+      { match: "/agents/agent-1/policy", status: 200, body: { agentId: "agent-1", policy: {}, version: 2 } },
+    ],
+  });
+  assert.equal(r.code, 1);
+  assert.equal(r.requests.length, 0);
+  for (const field of [
+    "maxTxAmount",
+    "dailySpendingLimit",
+    "allowedAssets",
+    "allowedDestinations",
+    "allowedContractIds",
+    "txTypeRestrictions",
+    "approvalThreshold",
+    "requireHumanApprovalForAmountAbove",
+  ]) {
+    assert.match(r.stderr, new RegExp(field));
+  }
+});
+
+test("CLI v3: policy update → policy get envelope rejected with guidance and no request sent", () => {
+  const envelope = {
+    agentId: "agent-1",
+    policy: { dailySpendingLimit: { XLM: "10" } },
+    version: 3,
+    updatedAt: "2026-01-01T00:00:00Z",
+  };
+  const r = run(["policy", "update", "agent-1", "--rules", JSON.stringify(envelope)], {
+    responses: [
+      { match: "/agents/agent-1/policy", status: 200, body: envelope },
+    ],
+  });
+  assert.equal(r.code, 1);
+  assert.equal(r.requests.length, 0);
+  assert.match(r.stderr, /envelope/i);
+  assert.match(r.stderr, /inner 'policy' object/i);
+});
+
+test("CLI v3: policy update → non-object JSON rejected without sending request", () => {
+  const r = run(["policy", "update", "agent-1", "--rules", "[]"]);
+  assert.equal(r.code, 1);
+  assert.equal(r.requests.length, 0);
+  assert.match(r.stderr, /JSON object/);
+});
+
+test("CLI v3: policy update → valid partial update applies and prints stored policy", () => {
+  const partial = { dailySpendingLimit: { XLM: "10" } };
+  const stored = {
+    agentId: "agent-1",
+    version: 5,
+    updatedAt: "2026-01-02T00:00:00Z",
+    policy: {
+      maxTxAmount: { XLM: "100" },
+      dailySpendingLimit: { XLM: "10" },
+      allowedAssets: ["XLM"],
+      approvalThreshold: "50",
+    },
+  };
+  const r = run(["policy", "update", "agent-1", "--rules", JSON.stringify(partial)], {
+    responses: [{ match: "/agents/agent-1/policy", status: 200, body: stored }],
+  });
+  assert.equal(r.code, 0);
+  assert.equal(r.requests.length, 1);
+  assert.equal(r.requests[0]!.method, "PUT");
+  assert.deepEqual(r.requests[0]!.body, partial);
+  assert.match(r.stdout, /Policy updated:/);
+  assert.match(r.stdout, /Version:\s+5/);
+  assert.match(r.stdout, /Daily Limit:\s+\{"XLM":"10"\}/);
+  assert.match(r.stdout, /Max Tx:\s+\{"XLM":"100"\}/);
+  assert.match(r.stdout, /Assets:\s+XLM/);
+});
+
 // ===== Batch 3: Schedule Create =====
 
 test("CLI v3: schedule create → POST /agents/:id/schedules, exit 0", () => {
