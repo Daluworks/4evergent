@@ -14,6 +14,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { readFileSync, writeFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
+import { COMMAND_TREE, COMMANDS_HELP } from "../src/commands.js";
 
 // Resolve the tsx CLI entry point directly so we can spawn `node tsx/cli`
 // instead of `npx tsx`, which goes through a .ps1 wrapper that fails under
@@ -1917,6 +1918,90 @@ test("CLI: --help documents --issuer option", () => {
   const r = run(["--help"]);
   assert.equal(r.code, 0);
   assert.match(r.stdout, /--issuer/);
+});
+
+// ===== Help paths (#349) =====
+
+test("CLI: --help lists every subcommand declared in the command tree", () => {
+  const r = run(["--help"]);
+  assert.equal(r.code, 0);
+  assert.equal(r.requests.length, 0);
+  for (const [cmdName, cmdDef] of Object.entries(COMMAND_TREE)) {
+    const line = COMMANDS_HELP.split("\n").find(
+      (candidate) => candidate === `  ${cmdName}` || candidate.startsWith(`  ${cmdName} `)
+    );
+    assert.ok(line, `top-level help is missing a line for '${cmdName}'`);
+    for (const subName of Object.keys(cmdDef.subcommands ?? {})) {
+      assert.ok(line.includes(subName), `help line for '${cmdName}' omits '${subName}': ${line}`);
+    }
+  }
+  assert.match(r.stdout, /approval list \| get <id> \| approve <id> \| reject <id>/);
+});
+
+test("CLI: every <command> --help prints its usage and exits 0", () => {
+  for (const cmdName of Object.keys(COMMAND_TREE)) {
+    const r = run([cmdName, "--help"]);
+    assert.equal(r.code, 0, `${cmdName} --help exited ${r.code}: ${r.stderr}`);
+    assert.equal(r.stderr, "", `${cmdName} --help wrote to stderr: ${r.stderr}`);
+    assert.equal(r.requests.length, 0, `${cmdName} --help sent a request`);
+    assert.ok(
+      r.stdout.startsWith(`4evergent ${cmdName}`),
+      `${cmdName} --help did not start with the command heading: ${r.stdout}`
+    );
+    assert.match(r.stdout, new RegExp(`Usage: 4evergent ${cmdName}`));
+    assert.doesNotMatch(r.stdout, /Unknown/);
+  }
+});
+
+test("CLI: agent --help lists its subcommands with descriptions", () => {
+  const r = run(["agent", "--help"]);
+  assert.equal(r.code, 0);
+  assert.equal(r.requests.length, 0);
+  assert.match(r.stdout, /Subcommands:/);
+  for (const [subName, subDef] of Object.entries(COMMAND_TREE.agent!.subcommands!)) {
+    assert.ok(r.stdout.includes(subName), `agent --help omits subcommand '${subName}'`);
+    assert.ok(r.stdout.includes(subDef.description), `agent --help omits the description of '${subName}'`);
+  }
+  assert.match(r.stdout, /Run '4evergent agent <subcommand> --help'/);
+});
+
+test("CLI: approval get --help documents the approval id argument and exits 0", () => {
+  const r = run(["approval", "get", "--help"]);
+  assert.equal(r.code, 0);
+  assert.equal(r.stderr, "");
+  assert.equal(r.requests.length, 0);
+  assert.match(r.stdout, /Usage: 4evergent approval get/);
+  assert.match(r.stdout, /<id>/);
+  assert.match(r.stdout, /Approval ID/);
+});
+
+test("CLI: intent submit --help prints the argument order for all three intent types", () => {
+  const r = run(["intent", "submit", "--help"]);
+  assert.equal(r.code, 0);
+  assert.equal(r.stderr, "");
+  assert.equal(r.requests.length, 0);
+  assert.match(r.stdout, /Usage: 4evergent intent submit <agent-id> <type>/);
+  assert.match(r.stdout, /payment <asset> <amount> <destination> <reason> \[memo\] \[--issuer <G\.\.\.>\]/);
+  assert.match(r.stdout, /trustline <assetCode> <issuer> <reason> \[limit\]/);
+  assert.match(r.stdout, /contract_call <contractId> <function> <args-json> <reason>/);
+  assert.match(r.stdout, /--idempotency-key/);
+  assert.doesNotMatch(r.stdout, /intent type required/);
+});
+
+test("CLI: --help/-h anywhere short-circuits and is never read as a positional", () => {
+  const argvs = [
+    ["intent", "submit", "payment", "--help"],
+    ["intent", "submit", "--help", "payment"],
+    ["schedule", "create", "-h"],
+    ["agent", "get", "--help"],
+  ];
+  for (const args of argvs) {
+    const r = run(args);
+    assert.equal(r.code, 0, `${args.join(" ")} exited ${r.code}: ${r.stderr}`);
+    assert.equal(r.stderr, "", `${args.join(" ")} wrote to stderr: ${r.stderr}`);
+    assert.equal(r.requests.length, 0, `${args.join(" ")} sent a request`);
+    assert.match(r.stdout, /^4evergent /);
+  }
 });
 
 
