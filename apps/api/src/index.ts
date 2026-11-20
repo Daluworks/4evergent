@@ -2021,7 +2021,7 @@ export async function createApiServer(options: ServerOptions) {
       const current = await approvals.get(approvalId);
       return approvalError(res, "APPROVAL_CONFLICT", { approvalId, activityId: approval.activityId, status: current?.status ?? approval.status, message: `approval already decided (now ${current?.status ?? approval.status}); refresh before retrying` });
     }
-    await store.update(approval.activityId, { status: "rejected", authorizationStatus: "denied_by_policy", error: "approval rejected by human" });
+    await store.update(approval.activityId, { status: "rejected", authorizationStatus: "denied_by_approver", error: "approval rejected by human" });
     // #353: rejected approval will never execute — release the reservation
     // made when the intent was created.
     await releaseDecisionReservation(approval.agentId, approval.policyDecision);
