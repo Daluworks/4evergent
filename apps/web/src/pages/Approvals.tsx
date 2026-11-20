@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
 import type { ApprovalRecord } from '../types';
-import { Skeleton, EmptyState, PaginationFooter } from '../components';
+import { ConfirmationModal, Skeleton, EmptyState, PaginationFooter } from '../components';
 
 const PAGE_SIZE = 50;
 
@@ -13,6 +13,7 @@ export default function Approvals() {
   const [nextOffset, setNextOffset] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [rejectId, setRejectId] = useState<string | null>(null);
   const [loadingId, setLoadingId] = useState<string | null>(null);
 
   const loadPage = useCallback(async (offset: number, replace: boolean) => {
@@ -95,10 +96,7 @@ export default function Approvals() {
                         <button className="btn btn-primary btn-sm" disabled={loadingId === a.id} onClick={() => handleAction(a.id, 'approve')}>
                           {loadingId === a.id ? 'Processing...' : 'Approve'}
                         </button>
-                        <button className="btn btn-danger btn-sm" disabled={loadingId === a.id} onClick={() => {
-                          if (!confirm('Reject this approval? This cannot be undone.')) return;
-                          handleAction(a.id, 'reject');
-                        }}>Reject</button>
+                        <button className="btn btn-danger btn-sm" disabled={loadingId === a.id} onClick={() => setRejectId(a.id)}>Reject</button>
                       </div>
                     );
                   })()}
@@ -110,6 +108,15 @@ export default function Approvals() {
       </div>
 
       <PaginationFooter hasMore={hasMore} loadingMore={loadingMore} onLoadMore={loadMore} itemCount={approvals.length} />
+      {rejectId !== null && (
+        <ConfirmationModal title="Reject this approval?" actionLabel="Reject"
+          onCancel={() => setRejectId(null)}
+          onConfirm={() => {
+            setRejectId(null);
+            handleAction(rejectId, 'reject');
+          }}
+        />
+      )}
     </section>
   );
 }

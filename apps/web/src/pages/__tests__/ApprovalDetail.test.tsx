@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within, fireEvent } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import ApprovalDetail from '../ApprovalDetail';
@@ -7,6 +7,7 @@ import ApprovalDetail from '../ApprovalDetail';
 const { mockApi } = vi.hoisted(() => ({
   mockApi: {
     approvalDetail: vi.fn(),
+    reject: vi.fn(),
   },
 }));
 
@@ -54,6 +55,25 @@ describe('ApprovalDetail', () => {
       expect(screen.getByText(/Approval/i)).toBeInTheDocument();
     });
     expect(screen.getByText('agent-a')).toBeInTheDocument();
+  });
+
+  it('rejects only after confirming the pending approval', async () => {
+    const approval = makeApproval();
+    mockApi.approvalDetail.mockResolvedValueOnce({ approval })
+      .mockResolvedValue({ approval: { ...approval, status: 'rejected' } });
+    mockApi.reject.mockResolvedValue({});
+    renderDetail();
+    const trigger = await screen.findByRole('button', { name: 'Reject' });
+    fireEvent.click(trigger);
+    const dialog = screen.getByRole('dialog', { name: 'Reject this approval?' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(mockApi.reject).not.toHaveBeenCalled();
+
+    fireEvent.click(trigger);
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Reject' }));
+    expect(mockApi.reject).toHaveBeenCalledWith('aprv-1');
+    await waitFor(() => expect(trigger).not.toBeInTheDocument());
   });
 
   it('renders error state', async () => {

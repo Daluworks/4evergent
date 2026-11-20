@@ -1,4 +1,4 @@
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
 import { test, expect, describe, vi, beforeEach } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { ScheduleManagement } from '../ScheduleManagement';
@@ -455,7 +455,6 @@ describe('ScheduleManagement', () => {
   test('delete confirmation + delete request', async () => {
     mockListSchedules.mockResolvedValue({ schedules: [defaultSchedule] });
     mockDeleteSchedule.mockResolvedValue({ deleted: true });
-    window.confirm = vi.fn(() => true);
 
     render(<MemoryRouter><ScheduleManagement agentId="agent-1" /></MemoryRouter>);
 
@@ -465,7 +464,13 @@ describe('ScheduleManagement', () => {
 
     fireEvent.click(screen.getByText('Delete'));
 
-    expect(window.confirm).toHaveBeenCalledWith('Delete this schedule? This cannot be undone.');
+    const dialog = screen.getByRole('dialog', { name: 'Delete this schedule?' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(mockDeleteSchedule).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Delete' }));
 
     await waitFor(() => {
       expect(mockDeleteSchedule).toHaveBeenCalledWith('agent-1', 'sched-1');

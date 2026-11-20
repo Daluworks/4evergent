@@ -14,6 +14,7 @@
 
 import { exit } from "node:process";
 import { createRequire } from "node:module";
+import { createInterface } from "node:readline";
 import { COMMAND_TREE, COMMANDS_HELP, buildCommandTree, dispatchCommand } from "./commands.js";
 import { generateCompletion } from "./completion.js";
 
@@ -221,12 +222,80 @@ async function cmdAgentGet(agentId: string) {
   }
 }
 
-async function cmdAgentStatus(agentId: string, status: "active" | "paused" | "disabled") {
+interface DestructiveConfirmationOptions {
+  force: boolean;
+  isTTY?: boolean;
+  input?: NodeJS.ReadableStream;
+  output?: NodeJS.WritableStream;
+}
+
+async function confirmDestructiveAction(
+  target: string,
+  consequence: string,
+  options: DestructiveConfirmationOptions
+): Promise<boolean> {
+  if (options.force) return true;
+
+  if (!(options.isTTY ?? Boolean(process.stdin.isTTY))) {
+    console.error("Refusing destructive action: stdin is not a TTY. Rerun with --force or --yes to proceed.");
+    return false;
+  }
+
+  const rl = createInterface({
+    input: options.input ?? process.stdin,
+    output: options.output ?? process.stderr,
+  });
+  const confirmed = await new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (answer: boolean) => {
+      if (settled) return;
+      settled = true;
+      rl.close();
+      resolve(answer);
+    };
+
+    rl.once("close", () => {
+      if (!settled) {
+        settled = true;
+        resolve(false);
+      }
+    });
+    rl.once("SIGINT", () => finish(false));
+    rl.question(
+      `${consequence}\n  Target: ${target}\nThis action cannot be undone. Continue? [y/N] `,
+      (answer) => finish(/^(y|yes)$/i.test(answer.trim()))
+    );
+  });
+
+  return confirmed;
+}
+
+async function cmdAgentStatus(agentId: string, status: "active" | "paused" | "disabled", force = false) {
   if (!agentId) {
-    console.error("Usage: 4evergent agent <pause|resume|disable> <id>");
+    console.error(
+      status === "disabled"
+        ? "Usage: 4evergent agent disable <id> [--force|--yes]"
+        : "Usage: 4evergent agent <pause|resume> <id>"
+    );
     return 1;
   }
   try {
+    if (status === "disabled") {
+      if (!force && !process.stdin.isTTY) {
+        console.error("Refusing destructive action: stdin is not a TTY. Rerun with --force or --yes to proceed.");
+        return 1;
+      }
+      if (!force) {
+        const { body: agent } = await request(`/agents/${encodeURIComponent(agentId)}`);
+        const target = `${agent.displayName ?? "(unnamed agent)"} (ID: ${agent.id ?? agentId})`;
+        const confirmed = await confirmDestructiveAction(target, "Disable this agent permanently?", { force });
+        if (!confirmed) {
+          console.error("Aborted; no changes made.");
+          return 1;
+        }
+      }
+    }
+
     const { body } = await request(`/agents/${encodeURIComponent(agentId)}/status`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -831,12 +900,29 @@ async function cmdScheduleDisable(agentId: string, scheduleId: string) {
   }
 }
 
-async function cmdScheduleDelete(agentId: string, scheduleId: string) {
+async function cmdScheduleDelete(agentId: string, scheduleId: string, force = false) {
   if (!agentId || !scheduleId) {
-    console.error("Usage: 4evergent schedule delete <agent-id> <schedule-id>");
+    console.error("Usage: 4evergent schedule delete <agent-id> <schedule-id> [--force|--yes]");
     return 1;
   }
   try {
+    if (!force && !process.stdin.isTTY) {
+      console.error("Refusing destructive action: stdin is not a TTY. Rerun with --force or --yes to proceed.");
+      return 1;
+    }
+    if (!force) {
+      const { body } = await request(
+        `/agents/${encodeURIComponent(agentId)}/schedules/${encodeURIComponent(scheduleId)}`
+      );
+      const schedule = body.schedule ?? body;
+      const target = `${schedule.scheduleExpression ?? "(unknown expression)"} (ID: ${schedule.id ?? scheduleId})`;
+      const confirmed = await confirmDestructiveAction(target, "Delete this schedule permanently?", { force });
+      if (!confirmed) {
+        console.error("Aborted; no changes made.");
+        return 1;
+      }
+    }
+
     await request(`/agents/${encodeURIComponent(agentId)}/schedules/${encodeURIComponent(scheduleId)}`, {
       method: "DELETE",
     });
@@ -862,7 +948,10 @@ export const dispatcherTree = buildCommandTree({
     create: (args) => cmdAgentCreate(args),
     pause: (args) => cmdAgentStatus(args[0] ?? "", "paused"),
     resume: (args) => cmdAgentStatus(args[0] ?? "", "active"),
-    disable: (args) => cmdAgentStatus(args[0] ?? "", "disabled"),
+    disable: (args) => {
+      const force = args.some((arg) => arg === "--force" || arg === "--yes");
+      return cmdAgentStatus(args.find((arg) => arg !== "--force" && arg !== "--yes") ?? "", "disabled", force);
+    },
   },
   approval: {
     list: () => cmdApprovalList(),
@@ -892,7 +981,11 @@ export const dispatcherTree = buildCommandTree({
     pause: (args) => cmdSchedulePause(args[0] ?? "", args[1] ?? ""),
     resume: (args) => cmdScheduleResume(args[0] ?? "", args[1] ?? ""),
     disable: (args) => cmdScheduleDisable(args[0] ?? "", args[1] ?? ""),
-    delete: (args) => cmdScheduleDelete(args[0] ?? "", args[1] ?? ""),
+    delete: (args) => {
+      const positionalArgs = args.filter((arg) => arg !== "--force" && arg !== "--yes");
+      const force = positionalArgs.length !== args.length;
+      return cmdScheduleDelete(positionalArgs[0] ?? "", positionalArgs[1] ?? "", force);
+    },
   },
   intent: {
     submit: (args) => cmdIntentSubmit(args[0] ?? "", args.slice(1), null),

@@ -1,7 +1,7 @@
 import { useId } from 'react';
 import { useEffect, useState } from 'react';
 import { api } from '../api';
-import { Skeleton } from '../components';
+import { ConfirmationModal, Skeleton } from '../components';
 import type { ScheduleRecord, SubmitPaymentIntent } from '../types';
 
 interface ScheduleManagementProps {
@@ -22,6 +22,7 @@ const CRON_PRESETS = [
 
 export function ScheduleManagement({ agentId, onError }: ScheduleManagementProps) {
   const [schedules, setSchedules] = useState<ScheduleRecord[] | null>(null);
+  const [deleteId, setDeleteId] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Track which schedule is being edited and its draft expression
@@ -53,7 +54,7 @@ export function ScheduleManagement({ agentId, onError }: ScheduleManagementProps
   };
 
   const handleDelete = async (scheduleId: string) => {
-    if (!confirm('Delete this schedule? This cannot be undone.')) return;
+    setDeleteId(null);
     try {
       await api.deleteSchedule(agentId, scheduleId);
       load();
@@ -236,12 +237,16 @@ export function ScheduleManagement({ agentId, onError }: ScheduleManagementProps
                     <button onClick={() => handleAction(s.id, 'resume')}>Resume</button>
                   )}
                   {' '}
-                  <button className="danger" onClick={() => handleDelete(s.id)}>Delete</button>
+                  <button className="danger" onClick={() => setDeleteId(s.id)}>Delete</button>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
+      )}
+      {deleteId !== null && (
+        <ConfirmationModal title="Delete this schedule?" actionLabel="Delete"
+          onCancel={() => setDeleteId(null)} onConfirm={() => handleDelete(deleteId)} />
       )}
     </div>
   );

@@ -9,6 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import net from "node:net";
+import { PassThrough } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { readFileSync, writeFileSync, rmSync } from "node:fs";
 import path from "node:path";
@@ -236,14 +237,21 @@ test("CLI: agent resume → status=active", () => {
   assert.match(r.stdout, /active/);
 });
 
-test("CLI: agent disable → status=disabled", () => {
-  const r = run(["agent", "disable", "agent-1"], {
+test("CLI: agent disable with --force → status=disabled", () => {
+  const r = run(["agent", "disable", "agent-1", "--force"], {
     responses: [
       { match: "/agents/agent-1/status", status: 200, body: { id: "agent-1", status: "disabled" } },
     ],
   });
   assert.equal(r.code, 0);
   assert.match(r.stdout, /disabled/);
+});
+
+test("CLI: agent disable without a TTY or --force refuses without an API request", () => {
+  const r = run(["agent", "disable", "agent-1"]);
+  assert.equal(r.code, 1);
+  assert.equal(r.requests.length, 0);
+  assert.match(r.stderr, /stdin is not a TTY/);
 });
 
 test("CLI: approval list → prints approvals", () => {
@@ -954,16 +962,32 @@ test("CLI v3: schedule disable → 404 → exit 1", () => {
   assert.match(r.stderr, /404/);
 });
 
-test("CLI v3: schedule delete → DELETE /agents/:id/schedules/:id, exit 0", () => {
-  const r = run(["schedule", "delete", "agent-1", "sch-1"], {
+test("CLI v3: schedule delete with --force → DELETE /agents/:id/schedules/:id, exit 0", () => {
+  const r = run(["schedule", "delete", "agent-1", "sch-1", "--force"], {
     responses: [{ match: "/agents/agent-1/schedules/sch-1", status: 200, body: { deleted: true } }],
   });
   assert.equal(r.code, 0);
   assert.match(r.stdout, /deleted/);
 });
 
+test("CLI v3: schedule delete with --yes skips confirmation", () => {
+  const r = run(["schedule", "delete", "agent-1", "sch-1", "--yes"], {
+    responses: [{ match: "/agents/agent-1/schedules/sch-1", status: 200, body: { deleted: true } }],
+  });
+  assert.equal(r.code, 0);
+  assert.equal(r.requests.length, 1);
+  assert.equal(r.requests[0]!.method, "DELETE");
+});
+
+test("CLI v3: schedule delete without a TTY or --force refuses without an API request", () => {
+  const r = run(["schedule", "delete", "agent-1", "sch-1"]);
+  assert.equal(r.code, 1);
+  assert.equal(r.requests.length, 0);
+  assert.match(r.stderr, /stdin is not a TTY/);
+});
+
 test("CLI v3: schedule delete → 404 → exit 1", () => {
-  const r = run(["schedule", "delete", "agent-1", "nope"], {
+  const r = run(["schedule", "delete", "agent-1", "nope", "--force"], {
     responses: [{ match: "/agents/agent-1/schedules/nope", status: 404, body: { error: "not found" } }],
   });
   assert.equal(r.code, 1);
@@ -1095,8 +1119,13 @@ interface CliHandlersModule {
   cmdSchedulePause: (agentId: string, scheduleId: string) => Promise<number>;
   cmdScheduleResume: (agentId: string, scheduleId: string) => Promise<number>;
   cmdScheduleDisable: (agentId: string, scheduleId: string) => Promise<number>;
-  cmdScheduleDelete: (agentId: string, scheduleId: string) => Promise<number>;
+  cmdScheduleDelete: (agentId: string, scheduleId: string, force?: boolean) => Promise<number>;
   cmdApprovalGet: (id: string) => Promise<number>;
+  confirmDestructiveAction: (
+    target: string,
+    consequence: string,
+    options: { force: boolean; isTTY?: boolean; input?: NodeJS.ReadableStream; output?: NodeJS.WritableStream }
+  ) => Promise<boolean>;
 }
 
 let cachedHandlersPromise: Promise<CliHandlersModule> | null = null;
@@ -1122,6 +1151,7 @@ function loadCliHandlers(): Promise<CliHandlersModule> {
   cmdScheduleDisable,
   cmdScheduleDelete,
   cmdApprovalGet,
+  confirmDestructiveAction,
 };\n`
       );
       const unitWrapperPath = CLI.replace(/\.ts$/, ".unit-wrapper.mts");
@@ -1210,6 +1240,68 @@ test("buildIntentArgs: payment happy path (with and without memo) and missing-ar
   const missingArgs = buildIntentArgs(["payment", "XLM", "25", "GDEST"]);
   assert.equal(missingArgs.intent, null);
   assert.match(missingArgs.error ?? "", /payment requires: <asset> <amount> <destination> <reason> \[memo\]/);
+});
+
+test("Destructive confirmation: confirms yes and defaults no for negative, empty, and EOF input", async () => {
+  const { confirmDestructiveAction } = await loadCliHandlers();
+
+  const confirmInput = new PassThrough();
+  const confirmOutput = new PassThrough();
+  let prompt = "";
+  confirmOutput.on("data", (chunk: Buffer) => {
+    prompt += chunk.toString();
+  });
+  confirmInput.end("yes\n");
+  assert.equal(
+    await confirmDestructiveAction("Treasury Agent (ID: agent-1)", "Disable this agent permanently?", {
+      force: false,
+      isTTY: true,
+      input: confirmInput,
+      output: confirmOutput,
+    }),
+    true
+  );
+  assert.match(prompt, /Treasury Agent \(ID: agent-1\)/);
+  assert.match(prompt, /cannot be undone/);
+  confirmOutput.destroy();
+
+  for (const answer of ["no\n", "\n", ""]) {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    input.end(answer);
+    assert.equal(
+      await confirmDestructiveAction("0 12 * * * (ID: sch-1)", "Delete this schedule permanently?", {
+        force: false,
+        isTTY: true,
+        input,
+        output,
+      }),
+      false
+    );
+    output.destroy();
+  }
+});
+
+test("Destructive confirmation: --force proceeds without prompting", async () => {
+  const { confirmDestructiveAction } = await loadCliHandlers();
+  const input = new PassThrough();
+  const output = new PassThrough();
+  let prompt = "";
+  output.on("data", (chunk: Buffer) => {
+    prompt += chunk.toString();
+  });
+  assert.equal(
+    await confirmDestructiveAction("agent-1", "Disable this agent permanently?", {
+      force: true,
+      isTTY: false,
+      input,
+      output,
+    }),
+    true
+  );
+  assert.equal(prompt, "");
+  input.destroy();
+  output.destroy();
 });
 
 test("buildIntentArgs: trustline with and without limit, and missing-args error", async () => {
@@ -1557,7 +1649,7 @@ test("All schedule handlers (cmdScheduleList, cmdScheduleGet, cmdScheduleCreate,
   assert.equal(disableRes.requests[0]!.path, "/agents/agent-1/schedules/sch-1/disable");
   assert.deepEqual(disableRes.requests[0]!.body, {});
 
-  const deleteRes = await runHandlerWithMockFetch(scheduleResponses, (m) => m.cmdScheduleDelete("agent-1", "sch-1"));
+  const deleteRes = await runHandlerWithMockFetch(scheduleResponses, (m) => m.cmdScheduleDelete("agent-1", "sch-1", true));
   assert.equal(deleteRes.code, 0);
   assert.equal(deleteRes.requests[0]!.method, "DELETE");
   assert.equal(deleteRes.requests[0]!.path, "/agents/agent-1/schedules/sch-1");
