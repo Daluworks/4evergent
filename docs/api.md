@@ -175,7 +175,13 @@ the Bearer integration surface. The document lists them under
 
 ### GET /health
 
-Public (no authentication). Returns `{"status":"ok","signerAccountId":"G..."}`.
+Public (no authentication). Returns `{"status":"ok","signerAccountId":"G...","version":"0.3.0","schemaVersion":5}`:
+
+- `status`: `"ok"`.
+- `signerAccountId`: configured Stellar signer public key.
+- `version`: running API package version (from `apps/api/package.json`).
+- `schemaVersion`: live SQLite `_meta.schema_version` integer for file-backed databases, or `null` when running in-memory.
+
 This liveness response stays unconditional and performs no dependency checks.
 
 ### GET /health/ready
