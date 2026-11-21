@@ -93,19 +93,17 @@ describe('ApprovalDetail', () => {
     });
   });
 
-  it('surfaces rejection error when approving for a paused or disabled agent', async () => {
-    const approval = makeApproval();
-    mockApi.approvalDetail.mockResolvedValue({ approval });
-    mockApi.approve.mockRejectedValue({
-      status: 409,
-      code: 'AGENT_NOT_ACTIVE',
-      message: 'agent is paused; cannot approve intent',
-    });
+  it('does not offer approve/reject buttons for an expired approval', async () => {
+    const expired = {
+      ...makeApproval(),
+      expiresAt: new Date(Date.now() - 3600_000).toISOString(),
+    };
+    mockApi.approvalDetail.mockResolvedValue({ approval: expired });
     renderDetail();
-    const trigger = await screen.findByRole('button', { name: 'Approve' });
-    fireEvent.click(trigger);
     await waitFor(() => {
-      expect(screen.getByText('agent is paused; cannot approve intent')).toBeInTheDocument();
+      expect(screen.getByText(/Approval/i)).toBeInTheDocument();
     });
+    expect(screen.queryByRole('button', { name: /approve/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /reject/i })).not.toBeInTheDocument();
   });
 });
