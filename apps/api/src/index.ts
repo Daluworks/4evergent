@@ -2048,6 +2048,23 @@ export async function createApiServer(options: ServerOptions) {
       return approvalError(res, "APPROVAL_INVALID_STATE", { approvalId, activityId: approval.activityId, status: approval.status, message: `cannot approve: ${transitionError}` });
     }
 
+    // Incident-response boundary: approving an intent for a non-active agent is rejected.
+    // Paused: pending approvals remain in `pending_approval` until TTL expiry, but cannot
+    // be approved (`agent is paused; cannot approve intent`). If resumed to active, approval is permitted.
+    // Disabled: terminal state. Approve is rejected (`agent is disabled; cannot approve intent`).
+    const agent = (await agentStore.get(approval.agentId)) ?? agents.get(approval.agentId);
+    if (!agent) {
+      return approvalError(res, "AGENT_NOT_FOUND", { approvalId, activityId: approval.activityId, status: approval.status, message: "agent not found" });
+    }
+    if (agent.status !== "active") {
+      return approvalError(res, "AGENT_NOT_ACTIVE", {
+        approvalId,
+        activityId: approval.activityId,
+        status: approval.status,
+        message: `agent is ${agent.status}; cannot approve intent`,
+      });
+    }
+
     // Atomic claim: pending_approval → approved in one conditional step.
     // A concurrent approve/reject that lands first wins; this request then
     // gets null and returns 409 instead of enqueueing a second execution.
