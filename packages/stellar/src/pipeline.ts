@@ -489,7 +489,32 @@ export class TransactionPipeline {
     // approval the operator may already have acted on and risks a duplicate
     // submission. The deny/allowlist reason is stored in approval.error and
     // the linked activity error so it surfaces in the API response.
-    const currentDecision = await this.policy.evaluate(approval.intent, approval.agentId, { skipReservation: true, skipApprovalThreshold: true });
+    // #373: When an approval is executed on a later UTC day than it was created,
+    // the submission day's reservation must be released and the execution day's
+    // daily limit must be atomically checked and reserved.
+    const execNow = new Date();
+    const executionDay = new Date(Date.UTC(execNow.getUTCFullYear(), execNow.getUTCMonth(), execNow.getUTCDate()))
+      .toISOString()
+      .slice(0, 10);
+    const submissionTimestamp = approval.requestedAt || approval.createdAt;
+    const submissionDate = submissionTimestamp ? new Date(submissionTimestamp) : execNow;
+    const submissionDay = new Date(Date.UTC(submissionDate.getUTCFullYear(), submissionDate.getUTCMonth(), submissionDate.getUTCDate()))
+      .toISOString()
+      .slice(0, 10);
+    const crossedMidnight = submissionDay !== executionDay;
+
+    if (crossedMidnight) {
+      await this.releaseApprovalReservation(approval, submissionDate);
+    }
+
+    const currentDecision = await this.policy.evaluate(approval.intent, approval.agentId, {
+      skipReservation: !crossedMidnight,
+      skipApprovalThreshold: true,
+    });
+    if (crossedMidnight && currentDecision.reservedDailySpending) {
+      approval.policyDecision = currentDecision;
+      approval.requestedAt = execNow.toISOString();
+    }
     if (currentDecision.result !== "allow") {
       const reason = `Policy re-evaluation did not allow execution: ${currentDecision.reason} (rule: ${currentDecision.rule})`;
       await this.approvalStore.update(approvalId, { status: "failed", error: reason });
@@ -499,9 +524,11 @@ export class TransactionPipeline {
           await this.activityStore.update(approval.activityId, { status: "failed", error: reason });
         }
       }
-      // #353: failed approval will never execute — release the reservation
-      // made when the intent was created.
-      await this.releaseApprovalReservation(approval);
+      // #353 / #373: failed approval will never execute — release any active
+      // reservation (on the same day if not crossed, or if currentDecision reserved).
+      if (!crossedMidnight || currentDecision.reservedDailySpending) {
+        await this.releaseApprovalReservation(approval);
+      }
       return {
         status: "rejected",
         message: reason,
@@ -528,6 +555,7 @@ export class TransactionPipeline {
       };
     } catch (e: any) {
       await this.approvalStore.update(approvalId, { status: "failed", error: e.message });
+      await this.updateLinkedActivity(approval.activityId, { status: "failed", error: e.message });
       // #353: source account unloadable — execution cannot proceed, release.
       await this.releaseApprovalReservation(approval);
       return {
@@ -551,6 +579,7 @@ export class TransactionPipeline {
         throw e;
       }
       await this.approvalStore.update(approvalId, { status: "failed", error: e.message });
+      await this.updateLinkedActivity(approval.activityId, { status: "failed", error: e.message });
       // #353: construction failed — release the creation-time reservation.
       await this.releaseApprovalReservation(approval);
       return {
@@ -565,12 +594,19 @@ export class TransactionPipeline {
     checkAbort();
     const simResult = await this.simulator.simulate(tx);
     if (!simResult.success) {
-      await this.approvalStore.update(approvalId, { status: "failed", error: simResult.error ?? "Simulation failed" });
+      const simError = simResult.error ?? "Simulation failed";
+      await this.approvalStore.update(approvalId, { status: "failed", error: simError });
+      await this.updateLinkedActivity(approval.activityId, {
+        status: "failed",
+        authorizationStatus: "denied_by_simulation",
+        error: simError,
+        simulationResult: simResult,
+      });
       // #353: simulation failed — release the creation-time reservation.
       await this.releaseApprovalReservation(approval);
       return {
         status: "simulation_failed",
-        message: simResult.error ?? "Simulation failed",
+        message: simError,
         policyDecision: { result: "deny", reason: "simulation", rule: "approval", intent },
         simulationResult: simResult,
         activityId: approval.activityId,
@@ -586,6 +622,7 @@ export class TransactionPipeline {
         throw e;
       }
       await this.approvalStore.update(approvalId, { status: "failed", error: e.message });
+      await this.updateLinkedActivity(approval.activityId, { status: "failed", error: e.message });
       // #353: signing failed — release the creation-time reservation.
       await this.releaseApprovalReservation(approval);
       return {
@@ -640,6 +677,12 @@ export class TransactionPipeline {
         throw e;
       }
       await this.approvalStore.update(approvalId, { status: "failed", error: e.message, txHash: preSubmitHash });
+      await this.updateLinkedActivity(approval.activityId, {
+        status: "failed",
+        error: e.message,
+        txHash: preSubmitHash,
+        simulationResult: simResult,
+      });
       // #353: submission failed — release the creation-time reservation.
       await this.releaseApprovalReservation(approval);
       return {
@@ -654,6 +697,26 @@ export class TransactionPipeline {
   }
 
   /**
+   * Best-effort update of the linked activity record for an approved execution (#291).
+   * Never throws on a missing activity record or store error so it cannot alter
+   * the returned PipelineOutcome.
+   */
+  private async updateLinkedActivity(
+    activityId: string | undefined,
+    patch: Partial<ActivityRecord>,
+  ): Promise<void> {
+    if (!activityId || !this.activityStore) return;
+    try {
+      const existing = await this.activityStore.get(activityId);
+      if (existing) {
+        await this.activityStore.update(activityId, patch);
+      }
+    } catch {
+      // Best-effort bookkeeping — must never alter the returned outcome.
+    }
+  }
+
+  /**
    * Release the daily-spending reservation recorded on a decision (#353).
    * No-op when the decision reserved nothing (deny, skipReservation
    * re-check, pre-#353 decision) or the store cannot release. A release
@@ -663,22 +726,29 @@ export class TransactionPipeline {
    * an unknown state (the transaction may have landed), so the reservation
    * is conservatively kept.
    */
-  private async releaseReservation(agentId: string, decision: PolicyDecision | null | undefined): Promise<void> {
+  private async releaseReservation(agentId: string, decision: PolicyDecision | null | undefined, atDate?: Date): Promise<void> {
     const reserved = decision?.reservedDailySpending;
     if (!reserved || !this.activityStore?.releaseDailySpending) return;
     try {
-      await this.activityStore.releaseDailySpending(agentId, reserved.asset, reserved.amount);
+      await this.activityStore.releaseDailySpending(agentId, reserved.asset, reserved.amount, atDate);
     } catch {
       // Best-effort bookkeeping — see above.
     }
   }
 
   /** Release the reservation made when the approval's intent was created. */
-  private async releaseApprovalReservation(approval: {
-    agentId: string;
-    policyDecision: PolicyDecision;
-  }): Promise<void> {
-    await this.releaseReservation(approval.agentId, approval.policyDecision);
+  private async releaseApprovalReservation(
+    approval: {
+      agentId: string;
+      policyDecision: PolicyDecision;
+      requestedAt?: string;
+      createdAt?: string;
+    },
+    atDate?: Date
+  ): Promise<void> {
+    const ts = approval.requestedAt || approval.createdAt;
+    const effectiveDate = atDate ?? (ts ? new Date(ts) : undefined);
+    await this.releaseReservation(approval.agentId, approval.policyDecision, effectiveDate);
   }
 
   /**
