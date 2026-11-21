@@ -33,9 +33,8 @@ import { randomBytes, randomUUID, scryptSync, timingSafeEqual, createHash } from
 import type { DatabaseSync } from "node:sqlite";
 import { Keypair, StrKey } from "@stellar/stellar-sdk";
 import { jwtVerify, createRemoteJWKSet } from "jose";
-import { getSharedConnection } from "@4evergent/database";
-import type { AuthProvider, AuthenticatedPrincipal } from "@4evergent/shared";
 import { getSharedConnection, closeSharedConnection } from "@4evergent/database";
+import type { AuthProvider, AuthenticatedPrincipal } from "@4evergent/shared";
 import { SlidingWindowRateLimiter, clientKey } from "./rate-limit.js";
 
 export const SESSION_COOKIE_NAME = "four_eg_session";

@@ -17,14 +17,23 @@ export function getSharedConnection(dbPath: string): DatabaseSync {
     return existing.db;
   }
   const db = new DatabaseSync(dbPath);
-  // WAL allows readers to continue while another connection writes. These
-  // connection settings apply to every store sharing this connection.
-  db.exec("PRAGMA journal_mode = WAL;");
-  db.exec("PRAGMA busy_timeout = 5000;");
-  db.exec("PRAGMA synchronous = NORMAL;");
-  db.exec("CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT);");
-  runSchemaMigrations(db);
-  connections.set(dbPath, db);
+  try {
+    // WAL allows readers to continue while another connection writes. These
+    // connection settings apply to every store sharing this connection.
+    db.exec("PRAGMA journal_mode = WAL;");
+    db.exec("PRAGMA busy_timeout = 5000;");
+    db.exec("PRAGMA synchronous = NORMAL;");
+    db.exec("CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT);");
+    runSchemaMigrations(db);
+  } catch (err) {
+    try {
+      db.close();
+    } catch {
+      // ignore
+    }
+    throw err;
+  }
+  connections.set(dbPath, { db, refCount: 1 });
   return db;
 }
 
@@ -60,10 +69,25 @@ export function runSchemaMigrations(db: DatabaseSync): void {
   }
 }
 
-export function closeSharedConnection(dbPath: string): void {
-  const db = connections.get(dbPath);
-  if (db) {
-    db.close();
+export function closeSharedConnection(dbPath: string, force = false): void {
+  const entry = connections.get(dbPath);
+  if (!entry) return;
+
+  if (!force) {
+    entry.refCount--;
+    if (entry.refCount > 0) {
+      return;
+    }
+  }
+
+  try {
+    try {
+      entry.db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+    } catch {
+      // Best-effort checkpoint before close
+    }
+    entry.db.close();
+  } finally {
     connections.delete(dbPath);
   }
 }

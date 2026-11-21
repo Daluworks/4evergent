@@ -88,6 +88,7 @@ export interface ApprovalStore {
    * Returns the count of transitioned records.
    */
   sweepExpired(now?: string, limit?: number, onSwept?: (record: ApprovalRecord) => void | Promise<void>): Promise<number>;
+  close?(): void;
 }
 
 export type ApprovalStatus =
@@ -423,6 +424,8 @@ export class InMemoryApprovalStore implements ApprovalStore {
     }
     return count;
   }
+
+  close(): void {}
 }
 
 /**
