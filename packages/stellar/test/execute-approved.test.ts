@@ -107,6 +107,7 @@ async function createFixture(options: {
       txTypeRestrictions: { payment: true },
     },
     policyResolver: options.policyResolver,
+    agentResolver: options.agentResolver,
   });
 
   const internals = pipeline as unknown as {

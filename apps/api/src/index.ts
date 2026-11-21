@@ -265,6 +265,11 @@ export async function createApiServer(options: ServerOptions) {
     approvalStore: approvals,
     policyRules: options.policyRules,
     policyResolver: getRules,
+    agentResolver: async (agentId: string) => {
+      const dbAgent = await agentStore.get(agentId);
+      if (dbAgent) return dbAgent;
+      return agents.get(agentId);
+    },
   });
 
   // Phase 28J: PolicyEngine in API uses the SAME resolver
@@ -519,6 +524,37 @@ export async function createApiServer(options: ServerOptions) {
       record: ExecutionRecord,
       context?: import("./execution-queue.js").ExecutionContext
     ) => {
+      // Incident-response boundary: Check agent status before acquiring lock / submitting.
+      // An execution queued (or retried) while an agent was active must NOT execute
+      // or submit to Horizon if the agent has since been paused or disabled.
+      const agent = (await agentStore.get(record.agentId)) ?? agents.get(record.agentId);
+      if (agent && agent.status !== "active") {
+        const agentStatus = agent.status;
+        const message = `agent is ${agentStatus}; queued execution rejected`;
+        if (record.approvalId) {
+          await approvals.update(record.approvalId, { status: "failed", error: message });
+          const app = await approvals.get(record.approvalId);
+          if (app) {
+            await releaseDecisionReservation(app.agentId, app.policyDecision);
+          }
+        }
+        if (record.activityId) {
+          const act = await store.get(record.activityId);
+          if (act) {
+            await store.update(record.activityId, { status: "failed", error: message });
+          }
+        }
+        return {
+          record,
+          success: false,
+          status: "rejected",
+          error: message,
+          errorClass: "permanent" as const,
+          txHash: undefined,
+          submittedHash: null,
+          activityId: record.activityId ?? undefined,
+        };
+      }
       // Phase 25: Wrap sequence-sensitive execution in account-scoped lock.
       //
       // WHY: Two concurrent executions using the SAME Stellar source account
@@ -1421,6 +1457,9 @@ export async function createApiServer(options: ServerOptions) {
         details: { currentStatus: result.currentStatus, requestedStatus: status },
       });
     }
+    if (agents.has(agentId)) {
+      agents.set(agentId, result.agent);
+    }
     return json(res, { id: result.agent.id, status: result.agent.status });
   }
 
@@ -2002,6 +2041,23 @@ export async function createApiServer(options: ServerOptions) {
     const transitionError = validateApprovalTransition(approval.status, "approved");
     if (transitionError) {
       return approvalError(res, "APPROVAL_INVALID_STATE", { approvalId, activityId: approval.activityId, status: approval.status, message: `cannot approve: ${transitionError}` });
+    }
+
+    // Incident-response boundary: approving an intent for a non-active agent is rejected.
+    // Paused: pending approvals remain in `pending_approval` until TTL expiry, but cannot
+    // be approved (`agent is paused; cannot approve intent`). If resumed to active, approval is permitted.
+    // Disabled: terminal state. Approve is rejected (`agent is disabled; cannot approve intent`).
+    const agent = (await agentStore.get(approval.agentId)) ?? agents.get(approval.agentId);
+    if (!agent) {
+      return approvalError(res, "AGENT_NOT_FOUND", { approvalId, activityId: approval.activityId, status: approval.status, message: "agent not found" });
+    }
+    if (agent.status !== "active") {
+      return approvalError(res, "AGENT_NOT_ACTIVE", {
+        approvalId,
+        activityId: approval.activityId,
+        status: approval.status,
+        message: `agent is ${agent.status}; cannot approve intent`,
+      });
     }
 
     // Atomic claim: pending_approval → approved in one conditional step.

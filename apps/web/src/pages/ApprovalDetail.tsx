@@ -37,7 +37,9 @@ export default function ApprovalDetail() {
       const r = await api.approvalDetail(approval.id);
       setApproval(r.approval);
     } catch (e: any) {
-      if (e.status === 409) {
+      if (e.code === 'AGENT_NOT_ACTIVE') {
+        setActionError(e.message ?? 'Agent is paused or disabled; approvals cannot be executed');
+      } else if (e.status === 409) {
         setActionError(e.message ?? 'Approval state changed; please refresh');
       } else {
         setActionError(e.message ?? 'Approve failed');
