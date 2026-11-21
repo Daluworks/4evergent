@@ -637,12 +637,18 @@ export class TransactionPipeline {
    */
   private async outcomeFromRecord(winner: ActivityRecord): Promise<PipelineOutcome> {
     const fallbackSim = { success: true, fee: "100", operations: 1, warnings: [] };
+    const decision: PolicyDecision = winner.policyDecision ?? {
+      result: "allow",
+      reason: "replayed",
+      rule: "idempotency",
+      intent: winner.intent,
+    };
     switch (winner.status) {
       case "submitted":
         return {
           status: "submitted",
           message: `Transaction submitted: ${winner.txHash ?? "unknown"}`,
-          policyDecision: winner.policyDecision,
+          policyDecision: decision,
           simulationResult: (winner.simulationResult ?? fallbackSim) as SimulationLike,
           txHash: winner.txHash ?? "",
           activityId: winner.id,
@@ -652,8 +658,8 @@ export class TransactionPipeline {
         const approvalId = await this.findApprovalIdForActivity(winner.agentId, winner.id);
         return {
           status: "requires_approval",
-          message: winner.policyDecision.reason,
-          policyDecision: winner.policyDecision,
+          message: decision.reason,
+          policyDecision: decision,
           simulationResult: null,
           activityId: winner.id,
           approvalId,
@@ -664,7 +670,7 @@ export class TransactionPipeline {
           return {
             status: "simulation_failed",
             message: winner.error ?? "Simulation failed",
-            policyDecision: winner.policyDecision,
+            policyDecision: decision,
             simulationResult: (winner.simulationResult ?? fallbackSim) as SimulationLike,
             activityId: winner.id,
           };
@@ -672,7 +678,7 @@ export class TransactionPipeline {
         return {
           status: "rejected",
           message: winner.error ?? "Execution failed",
-          policyDecision: winner.policyDecision,
+          policyDecision: decision,
           simulationResult: winner.simulationResult as SimulationLike | null,
           txHash: winner.txHash,
           activityId: winner.id,
@@ -680,8 +686,8 @@ export class TransactionPipeline {
       default:
         return {
           status: "rejected",
-          message: winner.error ?? winner.policyDecision.reason,
-          policyDecision: winner.policyDecision,
+          message: winner.error ?? decision.reason,
+          policyDecision: decision,
           simulationResult: winner.simulationResult as SimulationLike | null,
           txHash: winner.txHash,
           activityId: winner.id,
@@ -722,6 +728,7 @@ export class TransactionPipeline {
     if (existingActivityId) {
       await this.activityStore.update(existingActivityId, {
         status: record.status,
+        policyDecision: record.policyDecision,
         authorizationStatus: record.authorizationStatus,
         error: record.error,
         txHash: record.txHash,

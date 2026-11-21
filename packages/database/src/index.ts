@@ -446,7 +446,7 @@ export function createActivity(
   agentId: string,
   ownerId: string,
   intent: AgentIntent,
-  policyDecision: PolicyDecision,
+  policyDecision?: PolicyDecision | null,
   idempotencyKey?: string | null
 ): ActivityRecord {
   const now = new Date().toISOString();
@@ -456,7 +456,7 @@ export function createActivity(
     ownerId,
     idempotencyKey,
     intent,
-    policyDecision,
+    policyDecision: policyDecision ?? null,
     authorizationStatus: null,
     simulationResult: null,
     txHash: null,
