@@ -57,9 +57,12 @@ export function ExecutionList({ agentId: propAgentId, onError, onExecutionClick 
       else setLoadMoreError(null);
     } catch (e: any) {
       const message = e.message ?? 'Failed to load executions';
-      if (replace) setError(message);
-      else setLoadMoreError(message);
-      onError?.(message);
+      if (replace) {
+        setError(message);
+        onError?.(message);
+      } else {
+        setLoadMoreError(message);
+      }
     }
   }, [agentId, onError]);
 
