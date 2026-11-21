@@ -70,7 +70,7 @@ interface IntentResponse {
   activityId: string;
   agentId: string;
   status: string;
-  policyDecision: PolicyDecision;
+  policyDecision: PolicyDecision | null;
   authorizationStatus: AuthorizationStatus;
   simulationResult: SimulationResult | null;
   txHash: string | null;
@@ -726,7 +726,7 @@ export async function createApiServer(options: ServerOptions) {
                 schedule.agentId,
                 schedule.ownerId,
                 schedule.intent,
-                { result: "allow", reason: "schedule enqueued", rule: "scheduler", intent: schedule.intent }
+                null
               );
               activityRecord.id = activityId;
               activityRecord.status = "pending";
@@ -774,12 +774,7 @@ export async function createApiServer(options: ServerOptions) {
             return {
               status: "submitted",
               message: "schedule enqueued for execution",
-              policyDecision: {
-                result: "allow",
-                reason: "schedule enqueued",
-                rule: "scheduler",
-                intent: schedule.intent,
-              },
+              policyDecision: null,
               simulationResult: null,
               txHash: null as unknown as string,
               activityId: undefined,
