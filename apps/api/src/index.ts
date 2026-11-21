@@ -1371,6 +1371,11 @@ export async function createApiServer(options: ServerOptions) {
     if (!agentId || !activityId) return apiError(res, "INVALID_PATH_PARAM");
     const allowed = await authorizationService.canAccessAgent(ctx, agentId);
     if (!allowed) return apiError(res, "AGENT_NOT_FOUND");
+    // Issue #385: the activity must belong to the agent named in the path.
+    // Same 404 as a nonexistent id — the response must not reveal whether the
+    // activity exists under a different agent.
+    const canAccess = await authorizationService.canAccessActivity(ctx, activityId, agentId);
+    if (!canAccess) return apiError(res, "ACTIVITY_NOT_FOUND");
     const activity = await store.getForOwner(activityId, ctx.ownerId!);
     if (!activity) return apiError(res, "ACTIVITY_NOT_FOUND");
     return json(res, { activity });
@@ -1447,10 +1452,13 @@ export async function createApiServer(options: ServerOptions) {
     if (!agentId || !scheduleId) return apiError(res, "INVALID_PATH_PARAM");
     const allowed = await authorizationService.canAccessAgent(ctx, agentId);
     if (!allowed) return apiError(res, "AGENT_NOT_FOUND");
+    // Issue #385: the schedule must belong to the agent named in the path.
+    // Same 404 as a nonexistent id — the response must not reveal whether the
+    // schedule exists under a different agent.
+    const canAccess = await authorizationService.canAccessSchedule(ctx, scheduleId, agentId);
+    if (!canAccess) return apiError(res, "SCHEDULE_NOT_FOUND");
     const schedule = await schedules.get(scheduleId);
-    if (!schedule || schedule.ownerId !== ctx.ownerId!) {
-      return apiError(res, "SCHEDULE_NOT_FOUND");
-    }
+    if (!schedule) return apiError(res, "SCHEDULE_NOT_FOUND");
     return json(res, { schedule });
   }
 
@@ -1511,7 +1519,8 @@ export async function createApiServer(options: ServerOptions) {
     const agentId = match?.[1];
     const scheduleId = match?.[2];
     if (!agentId || !scheduleId) return apiError(res, "INVALID_PATH_PARAM");
-    const canUpdate = await authorizationService.canUpdateSchedule(ctx, scheduleId);
+    // Issue #385: bind the schedule to the agent named in the path.
+    const canUpdate = await authorizationService.canUpdateSchedule(ctx, scheduleId, agentId);
     if (!canUpdate) return apiError(res, "AGENT_NOT_FOUND");
 
     let body: unknown;
@@ -1597,7 +1606,8 @@ export async function createApiServer(options: ServerOptions) {
     const agentId = match?.[1];
     const scheduleId = match?.[2];
     if (!agentId || !scheduleId) return apiError(res, "INVALID_PATH_PARAM");
-    const canDelete = await authorizationService.canDeleteSchedule(ctx, scheduleId);
+    // Issue #385: bind the schedule to the agent named in the path.
+    const canDelete = await authorizationService.canDeleteSchedule(ctx, scheduleId, agentId);
     if (!canDelete) return apiError(res, "AGENT_NOT_FOUND");
     const deleted = await schedules.delete(scheduleId);
     if (!deleted) return apiError(res, "SCHEDULE_NOT_FOUND");
@@ -1613,12 +1623,13 @@ export async function createApiServer(options: ServerOptions) {
     if (!agentId || !scheduleId || !action) return apiError(res, "INVALID_PATH_PARAM");
 
     let allowed: boolean;
+    // Issue #385: bind the schedule to the agent named in the path.
     if (action === "pause") {
-      allowed = await authorizationService.canPauseSchedule(ctx, scheduleId);
+      allowed = await authorizationService.canPauseSchedule(ctx, scheduleId, agentId);
     } else if (action === "resume") {
-      allowed = await authorizationService.canResumeSchedule(ctx, scheduleId);
+      allowed = await authorizationService.canResumeSchedule(ctx, scheduleId, agentId);
     } else {
-      allowed = await authorizationService.canDisableSchedule(ctx, scheduleId);
+      allowed = await authorizationService.canDisableSchedule(ctx, scheduleId, agentId);
     }
     if (!allowed) return apiError(res, "AGENT_NOT_FOUND");
 
