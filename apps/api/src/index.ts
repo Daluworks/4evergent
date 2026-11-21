@@ -71,7 +71,7 @@ interface IntentResponse {
   activityId: string;
   agentId: string;
   status: string;
-  policyDecision: PolicyDecision;
+  policyDecision: PolicyDecision | null;
   authorizationStatus: AuthorizationStatus;
   simulationResult: SimulationResult | null;
   txHash: string | null;
@@ -266,6 +266,11 @@ export async function createApiServer(options: ServerOptions) {
     approvalStore: approvals,
     policyRules: options.policyRules,
     policyResolver: getRules,
+    agentResolver: async (agentId: string) => {
+      const dbAgent = await agentStore.get(agentId);
+      if (dbAgent) return dbAgent;
+      return agents.get(agentId);
+    },
   });
 
   // Phase 28J: PolicyEngine in API uses the SAME resolver
@@ -520,6 +525,37 @@ export async function createApiServer(options: ServerOptions) {
       record: ExecutionRecord,
       context?: import("./execution-queue.js").ExecutionContext
     ) => {
+      // Incident-response boundary: Check agent status before acquiring lock / submitting.
+      // An execution queued (or retried) while an agent was active must NOT execute
+      // or submit to Horizon if the agent has since been paused or disabled.
+      const agent = (await agentStore.get(record.agentId)) ?? agents.get(record.agentId);
+      if (agent && agent.status !== "active") {
+        const agentStatus = agent.status;
+        const message = `agent is ${agentStatus}; queued execution rejected`;
+        if (record.approvalId) {
+          await approvals.update(record.approvalId, { status: "failed", error: message });
+          const app = await approvals.get(record.approvalId);
+          if (app) {
+            await releaseDecisionReservation(app.agentId, app.policyDecision);
+          }
+        }
+        if (record.activityId) {
+          const act = await store.get(record.activityId);
+          if (act) {
+            await store.update(record.activityId, { status: "failed", error: message });
+          }
+        }
+        return {
+          record,
+          success: false,
+          status: "rejected",
+          error: message,
+          errorClass: "permanent" as const,
+          txHash: undefined,
+          submittedHash: null,
+          activityId: record.activityId ?? undefined,
+        };
+      }
       // Phase 25: Wrap sequence-sensitive execution in account-scoped lock.
       //
       // WHY: Two concurrent executions using the SAME Stellar source account
@@ -727,7 +763,7 @@ export async function createApiServer(options: ServerOptions) {
                 schedule.agentId,
                 schedule.ownerId,
                 schedule.intent,
-                { result: "allow", reason: "schedule enqueued", rule: "scheduler", intent: schedule.intent }
+                null
               );
               activityRecord.id = activityId;
               activityRecord.status = "pending";
@@ -775,12 +811,7 @@ export async function createApiServer(options: ServerOptions) {
             return {
               status: "submitted",
               message: "schedule enqueued for execution",
-              policyDecision: {
-                result: "allow",
-                reason: "schedule enqueued",
-                rule: "scheduler",
-                intent: schedule.intent,
-              },
+              policyDecision: null,
               simulationResult: null,
               txHash: null as unknown as string,
               activityId: undefined,
@@ -1372,6 +1403,11 @@ export async function createApiServer(options: ServerOptions) {
     if (!agentId || !activityId) return apiError(res, "INVALID_PATH_PARAM");
     const allowed = await authorizationService.canAccessAgent(ctx, agentId);
     if (!allowed) return apiError(res, "AGENT_NOT_FOUND");
+    // Issue #385: the activity must belong to the agent named in the path.
+    // Same 404 as a nonexistent id — the response must not reveal whether the
+    // activity exists under a different agent.
+    const canAccess = await authorizationService.canAccessActivity(ctx, activityId, agentId);
+    if (!canAccess) return apiError(res, "ACTIVITY_NOT_FOUND");
     const activity = await store.getForOwner(activityId, ctx.ownerId!);
     if (!activity) return apiError(res, "ACTIVITY_NOT_FOUND");
     return json(res, { activity });
@@ -1422,6 +1458,9 @@ export async function createApiServer(options: ServerOptions) {
         details: { currentStatus: result.currentStatus, requestedStatus: status },
       });
     }
+    if (agents.has(agentId)) {
+      agents.set(agentId, result.agent);
+    }
     return json(res, { id: result.agent.id, status: result.agent.status });
   }
 
@@ -1448,10 +1487,13 @@ export async function createApiServer(options: ServerOptions) {
     if (!agentId || !scheduleId) return apiError(res, "INVALID_PATH_PARAM");
     const allowed = await authorizationService.canAccessAgent(ctx, agentId);
     if (!allowed) return apiError(res, "AGENT_NOT_FOUND");
+    // Issue #385: the schedule must belong to the agent named in the path.
+    // Same 404 as a nonexistent id — the response must not reveal whether the
+    // schedule exists under a different agent.
+    const canAccess = await authorizationService.canAccessSchedule(ctx, scheduleId, agentId);
+    if (!canAccess) return apiError(res, "SCHEDULE_NOT_FOUND");
     const schedule = await schedules.get(scheduleId);
-    if (!schedule || schedule.ownerId !== ctx.ownerId!) {
-      return apiError(res, "SCHEDULE_NOT_FOUND");
-    }
+    if (!schedule) return apiError(res, "SCHEDULE_NOT_FOUND");
     return json(res, { schedule });
   }
 
@@ -1512,7 +1554,8 @@ export async function createApiServer(options: ServerOptions) {
     const agentId = match?.[1];
     const scheduleId = match?.[2];
     if (!agentId || !scheduleId) return apiError(res, "INVALID_PATH_PARAM");
-    const canUpdate = await authorizationService.canUpdateSchedule(ctx, scheduleId);
+    // Issue #385: bind the schedule to the agent named in the path.
+    const canUpdate = await authorizationService.canUpdateSchedule(ctx, scheduleId, agentId);
     if (!canUpdate) return apiError(res, "AGENT_NOT_FOUND");
 
     let body: unknown;
@@ -1598,7 +1641,8 @@ export async function createApiServer(options: ServerOptions) {
     const agentId = match?.[1];
     const scheduleId = match?.[2];
     if (!agentId || !scheduleId) return apiError(res, "INVALID_PATH_PARAM");
-    const canDelete = await authorizationService.canDeleteSchedule(ctx, scheduleId);
+    // Issue #385: bind the schedule to the agent named in the path.
+    const canDelete = await authorizationService.canDeleteSchedule(ctx, scheduleId, agentId);
     if (!canDelete) return apiError(res, "AGENT_NOT_FOUND");
     const deleted = await schedules.delete(scheduleId);
     if (!deleted) return apiError(res, "SCHEDULE_NOT_FOUND");
@@ -1614,12 +1658,13 @@ export async function createApiServer(options: ServerOptions) {
     if (!agentId || !scheduleId || !action) return apiError(res, "INVALID_PATH_PARAM");
 
     let allowed: boolean;
+    // Issue #385: bind the schedule to the agent named in the path.
     if (action === "pause") {
-      allowed = await authorizationService.canPauseSchedule(ctx, scheduleId);
+      allowed = await authorizationService.canPauseSchedule(ctx, scheduleId, agentId);
     } else if (action === "resume") {
-      allowed = await authorizationService.canResumeSchedule(ctx, scheduleId);
+      allowed = await authorizationService.canResumeSchedule(ctx, scheduleId, agentId);
     } else {
-      allowed = await authorizationService.canDisableSchedule(ctx, scheduleId);
+      allowed = await authorizationService.canDisableSchedule(ctx, scheduleId, agentId);
     }
     if (!allowed) return apiError(res, "AGENT_NOT_FOUND");
 
@@ -1997,6 +2042,23 @@ export async function createApiServer(options: ServerOptions) {
     const transitionError = validateApprovalTransition(approval.status, "approved");
     if (transitionError) {
       return approvalError(res, "APPROVAL_INVALID_STATE", { approvalId, activityId: approval.activityId, status: approval.status, message: `cannot approve: ${transitionError}` });
+    }
+
+    // Incident-response boundary: approving an intent for a non-active agent is rejected.
+    // Paused: pending approvals remain in `pending_approval` until TTL expiry, but cannot
+    // be approved (`agent is paused; cannot approve intent`). If resumed to active, approval is permitted.
+    // Disabled: terminal state. Approve is rejected (`agent is disabled; cannot approve intent`).
+    const agent = (await agentStore.get(approval.agentId)) ?? agents.get(approval.agentId);
+    if (!agent) {
+      return approvalError(res, "AGENT_NOT_FOUND", { approvalId, activityId: approval.activityId, status: approval.status, message: "agent not found" });
+    }
+    if (agent.status !== "active") {
+      return approvalError(res, "AGENT_NOT_ACTIVE", {
+        approvalId,
+        activityId: approval.activityId,
+        status: approval.status,
+        message: `agent is ${agent.status}; cannot approve intent`,
+      });
     }
 
     // Atomic claim: pending_approval → approved in one conditional step.
