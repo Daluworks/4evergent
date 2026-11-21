@@ -503,6 +503,7 @@ export class TransactionPipeline {
       };
     } catch (e: any) {
       await this.approvalStore.update(approvalId, { status: "failed", error: e.message });
+      await this.updateLinkedActivity(approval.activityId, { status: "failed", error: e.message });
       // #353: source account unloadable — execution cannot proceed, release.
       await this.releaseApprovalReservation(approval);
       return {
@@ -526,6 +527,7 @@ export class TransactionPipeline {
         throw e;
       }
       await this.approvalStore.update(approvalId, { status: "failed", error: e.message });
+      await this.updateLinkedActivity(approval.activityId, { status: "failed", error: e.message });
       // #353: construction failed — release the creation-time reservation.
       await this.releaseApprovalReservation(approval);
       return {
@@ -540,12 +542,19 @@ export class TransactionPipeline {
     checkAbort();
     const simResult = await this.simulator.simulate(tx);
     if (!simResult.success) {
-      await this.approvalStore.update(approvalId, { status: "failed", error: simResult.error ?? "Simulation failed" });
+      const simError = simResult.error ?? "Simulation failed";
+      await this.approvalStore.update(approvalId, { status: "failed", error: simError });
+      await this.updateLinkedActivity(approval.activityId, {
+        status: "failed",
+        authorizationStatus: "denied_by_simulation",
+        error: simError,
+        simulationResult: simResult,
+      });
       // #353: simulation failed — release the creation-time reservation.
       await this.releaseApprovalReservation(approval);
       return {
         status: "simulation_failed",
-        message: simResult.error ?? "Simulation failed",
+        message: simError,
         policyDecision: { result: "deny", reason: "simulation", rule: "approval", intent },
         simulationResult: simResult,
         activityId: approval.activityId,
@@ -561,6 +570,7 @@ export class TransactionPipeline {
         throw e;
       }
       await this.approvalStore.update(approvalId, { status: "failed", error: e.message });
+      await this.updateLinkedActivity(approval.activityId, { status: "failed", error: e.message });
       // #353: signing failed — release the creation-time reservation.
       await this.releaseApprovalReservation(approval);
       return {
@@ -615,6 +625,12 @@ export class TransactionPipeline {
         throw e;
       }
       await this.approvalStore.update(approvalId, { status: "failed", error: e.message, txHash: preSubmitHash });
+      await this.updateLinkedActivity(approval.activityId, {
+        status: "failed",
+        error: e.message,
+        txHash: preSubmitHash,
+        simulationResult: simResult,
+      });
       // #353: submission failed — release the creation-time reservation.
       await this.releaseApprovalReservation(approval);
       return {
@@ -625,6 +641,26 @@ export class TransactionPipeline {
         txHash: preSubmitHash,
         activityId: approval.activityId,
       };
+    }
+  }
+
+  /**
+   * Best-effort update of the linked activity record for an approved execution (#291).
+   * Never throws on a missing activity record or store error so it cannot alter
+   * the returned PipelineOutcome.
+   */
+  private async updateLinkedActivity(
+    activityId: string | undefined,
+    patch: Partial<ActivityRecord>,
+  ): Promise<void> {
+    if (!activityId || !this.activityStore) return;
+    try {
+      const existing = await this.activityStore.get(activityId);
+      if (existing) {
+        await this.activityStore.update(activityId, patch);
+      }
+    } catch {
+      // Best-effort bookkeeping — must never alter the returned outcome.
     }
   }
 
