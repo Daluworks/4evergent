@@ -297,6 +297,7 @@ export function buildCommandTree(handlers?: CommandTreeHandlers): CommandTree {
             { name: "expression", description: "Cron expression (5 fields)" },
             { name: "type", description: "Intent type", values: INTENT_TYPES },
           ],
+          flags: ["--issuer", "--timezone"],
           run: handlers ? (args) => handlers.schedule.create(args) : undefined,
         },
         update: {
@@ -352,7 +353,7 @@ export function buildCommandTree(handlers?: CommandTreeHandlers): CommandTree {
       name: "intent",
       description: "Submit transactional intents",
       usage:
-        "Usage: 4evergent intent submit <agent-id> <type> [args...] [--idempotency-key <key>]\nTypes: payment | trustline | contract_call",
+        "Usage: 4evergent intent submit <agent-id> <type> [args...] [--issuer <G...>] [--idempotency-key <key>]\nTypes: payment | trustline | contract_call",
       reportUnknownSubcommand: false,
       subcommands: {
         submit: {
@@ -366,7 +367,7 @@ export function buildCommandTree(handlers?: CommandTreeHandlers): CommandTree {
               values: INTENT_TYPES,
             },
           ],
-          flags: ["--idempotency-key"],
+          flags: ["--idempotency-key", "--issuer"],
           run: handlers ? (args) => handlers.intent.submit(args) : undefined,
         },
       },
@@ -411,8 +412,8 @@ export const COMMANDS_HELP = [
   "  execution list | get <id> | retry <id> | cancel <id>",
   "  policy get <agent-id> | update <agent-id>",
   "  activity list <agent-id> [limit] | get <agent-id> <activity-id>",
-  "  schedule list <agent-id> [limit] | get <agent-id> <schedule-id> | create <agent-id> <cron> <intent> | update <agent-id> <schedule-id> <cron> | pause <agent-id> <schedule-id> | resume <agent-id> <schedule-id> | disable <agent-id> <schedule-id> | delete <agent-id> <schedule-id> [--force|--yes]",
-  "  intent submit <agent-id> <type> [args...] [--idempotency-key <key>]",
+  "  schedule list <agent-id> [limit] | get <agent-id> <schedule-id> | create <agent-id> <cron> <intent> [--issuer <G...>] [--timezone <tz>] | update <agent-id> <schedule-id> <cron> | pause <agent-id> <schedule-id> | resume <agent-id> <schedule-id> | disable <agent-id> <schedule-id> | delete <agent-id> <schedule-id> [--force|--yes]",
+  "  intent submit <agent-id> <type> [args...] [--issuer <G...>] [--idempotency-key <key>]",
   "  completion bash | zsh",
 ].join("\n");
 

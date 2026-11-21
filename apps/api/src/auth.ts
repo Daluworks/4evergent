@@ -30,9 +30,10 @@
  */
 
 import { randomBytes, randomUUID, scryptSync, timingSafeEqual, createHash } from "node:crypto";
-import { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "node:sqlite";
 import { Keypair, StrKey } from "@stellar/stellar-sdk";
 import { jwtVerify, createRemoteJWKSet } from "jose";
+import { getSharedConnection } from "@4evergent/database";
 import type { AuthProvider, AuthenticatedPrincipal } from "@4evergent/shared";
 import { getSharedConnection, closeSharedConnection } from "@4evergent/database";
 import { SlidingWindowRateLimiter, clientKey } from "./rate-limit.js";
