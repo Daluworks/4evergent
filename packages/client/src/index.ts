@@ -81,7 +81,7 @@ export interface ApprovalRecord {
   updatedAt: string;
 }
 
-export type ExecutionStatus = "queued" | "executing" | "submitted" | "confirmed" | "failed" | "dead_letter";
+export type ExecutionStatus = "queued" | "executing" | "submitted" | "confirmed" | "failed" | "dead_letter" | "cancelled" | "requires_approval";
 
 export interface ExecutionRecord {
   id: string;
