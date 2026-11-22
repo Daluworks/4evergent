@@ -1,8 +1,9 @@
 import { useEffect, useState, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
+import { useAgentNames } from '../agentNames';
 import type { ExecutionRecord, QueueSummary, ExecutionStatus } from '../types';
-import { EmptyState, PaginationFooter, Skeleton } from '../components';
+import { AgentName, EmptyState, PaginationFooter, Skeleton } from '../components';
 
 type StatusFilter = 'all' | ExecutionStatus;
 
@@ -57,6 +58,7 @@ export default function Executions({ onExecutionClick }: { onExecutionClick?: (i
   const [error, setError] = useState<string | null>(null);
   const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const agentNames = useAgentNames();
 
   const loadPage = useCallback(async (offset: number, replace: boolean) => {
     try {
@@ -183,7 +185,7 @@ export default function Executions({ onExecutionClick }: { onExecutionClick?: (i
                         <code>{e.id.slice(0, 8)}</code>
                       )}
                     </td>
-                    <td><code>{e.agentId.slice(0, 8)}</code></td>
+                    <td><AgentName agentId={e.agentId} agentNames={agentNames} /></td>
                     <td>{e.intent.type}</td>
                     <td>{e.intent.type === 'payment' ? `${e.intent.amount} ${(e.intent.assetDetails as { code?: string } | undefined)?.code ?? e.intent.asset}` : '-'}</td>
                     <td>
