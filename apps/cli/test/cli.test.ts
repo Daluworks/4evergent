@@ -358,13 +358,48 @@ test("CLI: execution list → empty result", () => {
   assert.match(r.stdout, /No executions found/);
 });
 
-test("CLI: execution list → limit passed as query param", () => {
+test("CLI: execution list → default limit 100 passed as query param", () => {
   const r = run(["execution", "list"], {
     responses: [
       { match: "/executions?limit=100", status: 200, body: { executions: [] } },
     ],
   });
   assert.equal(r.code, 0);
+  assert.equal(r.requests.length, 1);
+  assert.equal(r.requests[0]!.path, "/executions?limit=100");
+});
+
+test("CLI: execution list with positional limit → passes query param", () => {
+  const r = run(["execution", "list", "10"], {
+    responses: [
+      { match: "/executions?limit=10", status: 200, body: { executions: [] } },
+    ],
+  });
+  assert.equal(r.code, 0);
+  assert.equal(r.requests.length, 1);
+  assert.equal(r.requests[0]!.path, "/executions?limit=10");
+});
+
+test("CLI: execution list with invalid limit string → exits 1 with usage", () => {
+  const r = run(["execution", "list", "abc"]);
+  assert.equal(r.code, 1);
+  assert.equal(r.requests.length, 0);
+  assert.match(r.stderr, /Usage: 4evergent execution list/);
+  assert.match(r.stderr, /limit must be an integer between 1 and 100/);
+});
+
+test("CLI: execution list out-of-bounds limit (0 and 101) → exits 1 with usage", () => {
+  const r0 = run(["execution", "list", "0"]);
+  assert.equal(r0.code, 1);
+  assert.equal(r0.requests.length, 0);
+  assert.match(r0.stderr, /Usage: 4evergent execution list/);
+  assert.match(r0.stderr, /limit must be an integer between 1 and 100/);
+
+  const r101 = run(["execution", "list", "101"]);
+  assert.equal(r101.code, 1);
+  assert.equal(r101.requests.length, 0);
+  assert.match(r101.stderr, /Usage: 4evergent execution list/);
+  assert.match(r101.stderr, /limit must be an integer between 1 and 100/);
 });
 
 test("CLI: execution list → API error → exit 1", () => {
@@ -1269,6 +1304,7 @@ interface CliHandlersModule {
   cmdScheduleDisable: (agentId: string, scheduleId: string) => Promise<number>;
   cmdScheduleDelete: (agentId: string, scheduleId: string, force?: boolean) => Promise<number>;
   cmdApprovalGet: (id: string) => Promise<number>;
+  cmdExecutionList: (limit?: string) => Promise<number>;
   confirmDestructiveAction: (
     target: string,
     consequence: string,
@@ -1299,6 +1335,7 @@ function loadCliHandlers(): Promise<CliHandlersModule> {
   cmdScheduleDisable,
   cmdScheduleDelete,
   cmdApprovalGet,
+  cmdExecutionList,
   confirmDestructiveAction,
 };\n`
       );
@@ -1647,6 +1684,40 @@ test("cmdActivityList: GET /agents/:id/activity?limit= with default and explicit
   const invalidLimit = await runHandlerWithMockFetch([], (m) => m.cmdActivityList("agent-1", "101"));
   assert.equal(invalidLimit.code, 1);
   assert.equal(invalidLimit.requests.length, 0);
+});
+
+test("cmdExecutionList: GET /executions?limit= with default and explicit limit, validates input", async () => {
+  const defaultLimit = await runHandlerWithMockFetch(
+    [{ match: "/executions?limit=100", status: 200, body: { executions: [] } }],
+    (m) => m.cmdExecutionList()
+  );
+  assert.equal(defaultLimit.code, 0);
+  assert.equal(defaultLimit.requests.length, 1);
+  assert.equal(defaultLimit.requests[0]!.method, "GET");
+  assert.equal(defaultLimit.requests[0]!.path, "/executions?limit=100");
+
+  const customLimit = await runHandlerWithMockFetch(
+    [{ match: "/executions?limit=10", status: 200, body: { executions: [] } }],
+    (m) => m.cmdExecutionList("10")
+  );
+  assert.equal(customLimit.code, 0);
+  assert.equal(customLimit.requests.length, 1);
+  assert.equal(customLimit.requests[0]!.method, "GET");
+  assert.equal(customLimit.requests[0]!.path, "/executions?limit=10");
+
+  const invalidAlpha = await runHandlerWithMockFetch([], (m) => m.cmdExecutionList("abc"));
+  assert.equal(invalidAlpha.code, 1);
+  assert.equal(invalidAlpha.requests.length, 0);
+  assert.match(invalidAlpha.stderr, /Usage: 4evergent execution list/);
+  assert.match(invalidAlpha.stderr, /limit must be an integer between 1 and 100/);
+
+  const invalidZero = await runHandlerWithMockFetch([], (m) => m.cmdExecutionList("0"));
+  assert.equal(invalidZero.code, 1);
+  assert.equal(invalidZero.requests.length, 0);
+
+  const invalidOver = await runHandlerWithMockFetch([], (m) => m.cmdExecutionList("101"));
+  assert.equal(invalidOver.code, 1);
+  assert.equal(invalidOver.requests.length, 0);
 });
 
 test("cmdAgentCreate: POST /agents with parsed displayName, description, capabilities, and stellarAddress", async () => {
