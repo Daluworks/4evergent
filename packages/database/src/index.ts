@@ -6,6 +6,7 @@ import type {
   SimulationResult,
   ScheduleStatus,
 } from "@4evergent/shared";
+import { toStroops } from "@4evergent/shared";
 import { clampOffset, clampLimit } from "./pagination.js";
 
 /**
@@ -37,7 +38,9 @@ export interface ActivityStore {
    * would free another intent's reservation.
    */
   releaseDailySpending(agentId: string, asset: string, amount: string, now?: Date): Promise<void>;
-  /** Get current day's total spent for an agent. */
+  /** Get current day's reserved total for an agent, in INTEGER STROOPS (#374),
+   *  or null when nothing is reserved. Convert to a decimal at the boundary
+   *  (`fromStroops`); the enforcement path compares these integers directly. */
   getDailySpending(agentId: string, asset: string, now?: Date): Promise<number | null>;
   /** Remove at most `limit` rows with a UTC day earlier than cutoffDay. */
   sweepDailySpending(cutoffDay: string, limit?: number): Promise<number>;
@@ -132,6 +135,7 @@ export interface ApprovalRecord {
  */
 export class InMemoryActivityStore implements ActivityStore {
   private records = new Map<string, ActivityRecord>();
+  /** #374: values are INTEGER stroops (1 XLM = 10^7 stroops), not decimal XLM. */
   private dailySpending = new Map<string, number>();
   private idempotencyLock: Promise<unknown> = Promise.resolve();
   /** Serializes daily-spending check+commit per store instance (atomicity). */
@@ -207,9 +211,13 @@ export class InMemoryActivityStore implements ActivityStore {
   }
 
   async reserveDailySpending(agentId: string, asset: string, amount: string, limit: string, now = new Date()): Promise<boolean> {
-    const amountNum = parseFloat(amount);
-    const limitNum = parseFloat(limit);
-    if (isNaN(amountNum) || isNaN(limitNum)) return false;
+    // #374: compare integer stroops, not REAL XLM. Float addition drifts the
+    // ledger and falsely denies exact-limit intents; integer stroops compare
+    // exactly to the stroop. A non-canonical amount/limit (null from
+    // toStroops) is rejected, matching the strict parser (#264).
+    const amountStroops = toStroops(amount);
+    const limitStroops = toStroops(limit);
+    if (amountStroops === null || limitStroops === null) return false;
 
     const day = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
       .toISOString()
@@ -223,14 +231,19 @@ export class InMemoryActivityStore implements ActivityStore {
     // achieves the same via a conditional UPDATE.
     const result = this.dailySpendingLock.then(() => {
       const current = this.dailySpending.get(mapKey) ?? 0;
-      if (current + amountNum > limitNum) return false;
-      this.dailySpending.set(mapKey, current + amountNum);
+      if (current + amountStroops > limitStroops) return false;
+      this.dailySpending.set(mapKey, current + amountStroops);
       return true;
     });
     this.dailySpendingLock = result.catch(() => undefined);
     return result;
   }
 
+  /**
+   * #374: returns the current UTC day's reserved total in INTEGER STROOPS,
+   * or null when nothing is reserved. Convert to a decimal at the boundary;
+   * the enforcement path compares these integers directly.
+   */
   async getDailySpending(agentId: string, asset: string, now = new Date()): Promise<number | null> {
     const day = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
       .toISOString().slice(0, 10);
@@ -239,8 +252,9 @@ export class InMemoryActivityStore implements ActivityStore {
   }
 
   async releaseDailySpending(agentId: string, asset: string, amount: string, now = new Date()): Promise<void> {
-    const amountNum = parseFloat(amount);
-    if (isNaN(amountNum) || amountNum <= 0) return;
+    // #374: release integer stroops, matching the reservation unit.
+    const amountStroops = toStroops(amount);
+    if (amountStroops === null || amountStroops <= 0) return;
 
     const day = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
       .toISOString()
@@ -255,7 +269,7 @@ export class InMemoryActivityStore implements ActivityStore {
     // intent's reservation beyond zeroing this key.
     const result = this.dailySpendingLock.then(() => {
       const current = this.dailySpending.get(mapKey) ?? 0;
-      const next = current - amountNum;
+      const next = current - amountStroops;
       if (next <= 0) this.dailySpending.delete(mapKey);
       else this.dailySpending.set(mapKey, next);
     });

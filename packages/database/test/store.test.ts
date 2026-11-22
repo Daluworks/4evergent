@@ -17,6 +17,7 @@ import {
   type ApprovalStatus,
 } from "../src/index.js";
 import type { AgentIntent, PolicyDecision } from "@4evergent/shared";
+import { toStroops } from "@4evergent/shared";
 
 function makeIntent(amount: string, _agentId = "agent-a"): AgentIntent {
   return {
@@ -267,7 +268,8 @@ for (const kind of ["InMemory", "SQLite"] as const) {
 
       assert.equal(await store.sweepDailySpending("2025-01-03"), 2);
       assert.equal(await store.getDailySpending("agent-a", "XLM", asDate("2025-01-02")), null);
-      assert.equal(await store.getDailySpending("agent-a", "XLM", asDate("2025-01-03")), 3);
+      // #374: totals are stored as integer stroops ("3" XLM = 30_000_000 stroops).
+      assert.equal(await store.getDailySpending("agent-a", "XLM", asDate("2025-01-03")), toStroops("3"));
       assert.equal(await store.sweepDailySpending("2025-01-03"), 0);
     } finally {
       if (store instanceof SQLiteActivityStore) store.close();
