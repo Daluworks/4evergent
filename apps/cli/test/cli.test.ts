@@ -262,8 +262,33 @@ test("CLI: approval list → prints approvals", () => {
     ],
   });
   assert.equal(r.code, 0);
+  assert.equal(r.requests[0]?.path, "/approvals");
   assert.match(r.stdout, /ap-123/);
   assert.match(r.stdout, /pending_approval/);
+});
+
+test("CLI: approval list sends status and either form of limit", () => {
+  for (const [args, path] of [
+    [["--status", "pending_approval"], "/approvals?status=pending_approval"],
+    [["--limit", "200", "--status", "approved"], "/approvals?status=approved&limit=200"],
+    [["10"], "/approvals?limit=10"],
+  ] as const) {
+    const r = run(["approval", "list", ...args], {
+      responses: [{ match: path, status: 200, body: { approvals: [] } }],
+    });
+    assert.equal(r.code, 0);
+    assert.equal(r.requests[0]?.method, "GET");
+    assert.equal(r.requests[0]?.path, path);
+  }
+});
+
+test("CLI: approval list rejects invalid filters before making a request", () => {
+  for (const args of [["--status", "unknown"], ["--status"], ["--limit", "201"], ["0"], ["1.5"], ["2", "--limit", "3"]]) {
+    const r = run(["approval", "list", ...args]);
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /Usage: 4evergent approval list/);
+    assert.equal(r.requests.length, 0);
+  }
 });
 
 test("CLI: approval approve → exit 0", () => {
