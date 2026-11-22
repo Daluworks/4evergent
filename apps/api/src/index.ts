@@ -500,7 +500,9 @@ export async function createApiServer(options: ServerOptions) {
         maxAgeMs: options.reconciliation.maxAgeMs,
         // #276: release the daily-spending reservation of a retired
         // execution, when the record proves one was made (#353).
+        // #363: sync on-chain failure to linked activity and approval.
         activityStore: store,
+        approvalStore: approvals,
       });
     reconciler.start();
     console.log("[reconciler] started, interval:", options.reconciliation.intervalMs ?? 30_000, "ms");
