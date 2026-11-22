@@ -123,6 +123,7 @@ function parseStatusFilter<T extends string>(
 export interface ServerOptions {
   port: number;
   horizonUrl: string;
+  sorobanRpcUrl?: string;
   signer: Signer;
   policyRules?: Partial<PolicyRules>;
   activityStore?: ActivityStore;
@@ -260,6 +261,7 @@ export async function createApiServer(options: ServerOptions) {
 
   const pipeline = new TransactionPipeline({
     horizonUrl: options.horizonUrl,
+    sorobanRpcUrl: options.sorobanRpcUrl,
     networkPassphrase: TESTNET_PASSPHRASE,
     signer: options.signer,
     activityStore: store,
@@ -2487,8 +2489,27 @@ function parseIntent(body: unknown): AgentIntent {
         reason: b.reason,
       };
     }
-    case "contract_call":
-      throw new Error(`intent type '${b.type}' is not yet supported by the transaction pipeline`);
+    case "contract_call": {
+      if (typeof b.contractId !== "string" || b.contractId.trim().length === 0) {
+        throw new Error("contract_call.contractId is required");
+      }
+      if (typeof b.function !== "string" || b.function.trim().length === 0) {
+        throw new Error("contract_call.function is required");
+      }
+      if (b.args !== undefined && !Array.isArray(b.args)) {
+        throw new Error("contract_call.args must be an array");
+      }
+      if (typeof b.reason !== "string" || b.reason.trim().length === 0) {
+        throw new Error("contract_call.reason is required");
+      }
+      return {
+        type: "contract_call",
+        contractId: b.contractId,
+        function: b.function,
+        args: Array.isArray(b.args) ? b.args : [],
+        reason: b.reason,
+      };
+    }
     case "account_settings": {
       if (typeof b.setting !== "string" || b.setting.trim().length === 0) {
         throw new Error("account_settings.setting is required");

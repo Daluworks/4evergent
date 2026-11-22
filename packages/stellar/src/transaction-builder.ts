@@ -3,10 +3,13 @@ import {
   Operation,
   Asset,
   Memo,
+  StrKey,
+  nativeToScVal,
+  xdr,
   type Account,
   type Transaction,
 } from "@stellar/stellar-sdk";
-import type { PaymentIntent, TrustlineIntent, AccountSettingsIntent } from "@4evergent/shared";
+import type { PaymentIntent, TrustlineIntent, AccountSettingsIntent, ContractCallIntent } from "@4evergent/shared";
 
 export interface AssetIdentifier {
   code: string;
@@ -171,6 +174,46 @@ export class StellarTransactionBuilder {
     });
     builder.addMemo(Memo.text(truncateToMemo(intent.reason)));
     builder.addOperation(setOptionsOp);
+    builder.setTimeout(30);
+
+    return builder.build();
+  }
+
+  async buildContractCall(
+    sourceAccount: Account,
+    intent: ContractCallIntent,
+    networkPassphrase: string
+  ): Promise<Transaction> {
+    if (intent.type !== "contract_call") {
+      throw new Error(`StellarTransactionBuilder: expected contract_call intent, got ${intent.type}`);
+    }
+
+    const contractId = intent.contractId?.trim();
+    if (!contractId || !StrKey.isValidContract(contractId)) {
+      throw new Error("StellarTransactionBuilder: contractId must be a valid Stellar contract address");
+    }
+
+    const functionName = intent.function?.trim();
+    if (!functionName || functionName.length === 0) {
+      throw new Error("StellarTransactionBuilder: function required");
+    }
+
+    const scValArgs: xdr.ScVal[] = (intent.args ?? []).map((arg: unknown) =>
+      arg instanceof xdr.ScVal ? arg : nativeToScVal(arg)
+    );
+
+    const invokeOp = Operation.invokeContractFunction({
+      contract: contractId,
+      function: functionName,
+      args: scValArgs,
+    });
+
+    const builder = new TransactionBuilder(sourceAccount, {
+      networkPassphrase,
+      fee: this.baseFeeStroops,
+    });
+    builder.addMemo(Memo.text(truncateToMemo(intent.reason)));
+    builder.addOperation(invokeOp);
     builder.setTimeout(30);
 
     return builder.build();
