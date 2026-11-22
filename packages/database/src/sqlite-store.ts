@@ -6,7 +6,7 @@ import type {
   PolicyDecision,
   SimulationResult,
 } from "@4evergent/shared";
-import { getSharedConnection } from "./shared-connection.js";
+import { getSharedConnection, closeSharedConnection } from "./shared-connection.js";
 import { clampOffset, clampLimit } from "./pagination.js";
 import { ensureTable, MigrationError } from "./migration.js";
 import type {
@@ -23,13 +23,16 @@ import type {
  * database server required. Data persists across process restarts in a file
  * at the path provided to the constructor.
  *
- * Schema is versioned in _meta (schema_version = 3). initSchema() is
+ * Schema is versioned in _meta (schema_version = 5). initSchema() is
  * idempotent and safe to call on every construction.
  */
 export class SQLiteActivityStore implements ActivityStore {
   private db: DatabaseSync;
+  private dbPath: string;
+  private closed = false;
 
   constructor(dbPath: string) {
+    this.dbPath = dbPath;
     this.db = getSharedConnection(dbPath);
     this.initSchema();
   }
@@ -103,7 +106,7 @@ export class SQLiteActivityStore implements ActivityStore {
         owner_id: record.ownerId,
         idempotency_key: record.idempotencyKey ?? null,
         intent_json: JSON.stringify(record.intent),
-        policy_decision_json: JSON.stringify(record.policyDecision),
+        policy_decision_json: JSON.stringify(record.policyDecision ?? null),
         authorization_status: record.authorizationStatus,
         simulation_result_json: record.simulationResult
           ? JSON.stringify(record.simulationResult)
@@ -333,7 +336,9 @@ export class SQLiteActivityStore implements ActivityStore {
   }
 
   close(): void {
-    // Shared connection — managed by closeSharedConnection() / closeAllSharedConnections()
+    if (this.closed) return;
+    this.closed = true;
+    closeSharedConnection(this.dbPath);
   }
 }
 
@@ -355,8 +360,11 @@ export class SQLiteActivityStore implements ActivityStore {
  */
 export class SQLiteApprovalStore implements ApprovalStore {
   private db: DatabaseSync;
+  private dbPath: string;
+  private closed = false;
 
   constructor(dbPath: string) {
+    this.dbPath = dbPath;
     this.db = getSharedConnection(dbPath);
     this.initSchema();
   }
@@ -604,7 +612,9 @@ export class SQLiteApprovalStore implements ApprovalStore {
   }
 
   close(): void {
-    // Shared connection — managed by closeSharedConnection() / closeAllSharedConnections()
+    if (this.closed) return;
+    this.closed = true;
+    closeSharedConnection(this.dbPath);
   }
 }
 
@@ -666,7 +676,7 @@ interface ActivityRow {
   owner_id: string;
   idempotency_key: string | null;
   intent_json: string;
-  policy_decision_json: string;
+  policy_decision_json: string | null;
   authorization_status: string | null;
   simulation_result_json: string | null;
   tx_hash: string | null;
@@ -703,7 +713,9 @@ function rowToActivityRecord(row: ActivityRow): ActivityRecord {
     ownerId: row.owner_id,
     idempotencyKey: row.idempotency_key,
     intent: JSON.parse(row.intent_json) as AgentIntent,
-    policyDecision: JSON.parse(row.policy_decision_json) as PolicyDecision,
+    policyDecision: row.policy_decision_json && row.policy_decision_json !== "null"
+      ? (JSON.parse(row.policy_decision_json) as PolicyDecision)
+      : null,
     authorizationStatus: row.authorization_status as AuthorizationStatus | null,
     simulationResult: row.simulation_result_json
       ? (JSON.parse(row.simulation_result_json) as SimulationResult)
