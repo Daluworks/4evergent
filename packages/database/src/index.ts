@@ -563,7 +563,7 @@ export { getAllowedPreviousAgentStatuses } from "./agent-types.js";
 export type { AgentStore, AgentStatusTransitionResult, CreateAgentInput } from "./agent-types.js";
 
 // Policy configuration stores (Phase 28A)
-export { SQLitePolicyConfigStore } from "./policy-config-store.js";
+export { CorruptPolicyConfigError, SQLitePolicyConfigStore } from "./policy-config-store.js";
 export { InMemoryPolicyConfigStore } from "./in-memory-policy-config-store.js";
 export type { PolicyConfigStore } from "./policy-config-store.js";
 

@@ -1300,7 +1300,15 @@ export async function createApiServer(options: ServerOptions) {
     const canAccess = await authorizationService.canAccessAgent(ctx, agentId);
     if (!canAccess) return apiError(res, "AGENT_NOT_FOUND");
 
-    const metadata = await policyConfigStore.getWithMetadata(agentId);
+    let metadata;
+    try {
+      metadata = await policyConfigStore.getWithMetadata(agentId);
+    } catch (error) {
+      if (error instanceof Error && error.name === "CorruptPolicyConfigError") {
+        return apiError(res, "POLICY_UNAVAILABLE");
+      }
+      throw error;
+    }
     if (metadata) {
       return json(res, {
         agentId,
