@@ -9,6 +9,11 @@ import type {
 import { getSharedConnection, closeSharedConnection } from "./shared-connection.js";
 import { clampOffset, clampLimit } from "./pagination.js";
 import { ensureTable, MigrationError } from "./migration.js";
+import {
+  idempotencyCutoff,
+  resolveIdempotencyWindowMs,
+  type ActivityStoreOptions,
+} from "./idempotency-window.js";
 import type {
   ActivityStore,
   ApprovalStore,
@@ -30,9 +35,14 @@ export class SQLiteActivityStore implements ActivityStore {
   private db: DatabaseSync;
   private dbPath: string;
   private closed = false;
+  /** #109: Idempotency-Key replay window. */
+  readonly idempotencyWindowMs: number;
+  private readonly now: () => number;
 
-  constructor(dbPath: string) {
+  constructor(dbPath: string, options: ActivityStoreOptions = {}) {
     this.dbPath = dbPath;
+    this.idempotencyWindowMs = resolveIdempotencyWindowMs(options.idempotencyWindowMs);
+    this.now = options.now ?? Date.now;
     this.db = getSharedConnection(dbPath);
     this.initSchema();
   }
@@ -65,6 +75,10 @@ export class SQLiteActivityStore implements ActivityStore {
       CREATE INDEX IF NOT EXISTS idx_activities_owner ON activities(owner_id);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_activities_idempotency
         ON activities(owner_id, agent_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL;
+      -- #109: bounded sweep of expired Idempotency-Key bindings.
+      CREATE INDEX IF NOT EXISTS idx_activities_idempotency_created
+        ON activities(created_at)
         WHERE idempotency_key IS NOT NULL;
     `);
     } catch (err) {
@@ -159,11 +173,35 @@ export class SQLiteActivityStore implements ActivityStore {
     return row ? rowToActivityRecord(row as unknown as ActivityRow) : null;
   }
 
+  /**
+   * #109: only a key bound to an activity created inside the replay window
+   * is returned. An older binding no longer suppresses a new request.
+   */
   async getByIdempotencyKey(ownerId: string, agentId: string, key: string): Promise<ActivityRecord | null> {
+    const cutoff = idempotencyCutoff(this.now(), this.idempotencyWindowMs);
     const row = this.db
-      .prepare("SELECT * FROM activities WHERE owner_id = ? AND agent_id = ? AND idempotency_key = ?")
-      .get(ownerId, agentId, key);
+      .prepare(
+        "SELECT * FROM activities WHERE owner_id = ? AND agent_id = ? AND idempotency_key = ? AND created_at >= ?"
+      )
+      .get(ownerId, agentId, key, cutoff);
     return row ? rowToActivityRecord(row as unknown as ActivityRow) : null;
+  }
+
+  /**
+   * #109: clear the Idempotency-Key of at most `limit` activities created
+   * before `cutoff`. The activity row itself is kept: it is the audit trail.
+   */
+  async releaseExpiredIdempotencyKeys(cutoff: string, limit = 500): Promise<number> {
+    if (!Number.isInteger(limit) || limit <= 0) return 0;
+    const result = this.db.prepare(`
+      UPDATE activities SET idempotency_key = NULL
+      WHERE rowid IN (
+        SELECT rowid FROM activities
+        WHERE idempotency_key IS NOT NULL AND created_at < ?
+        ORDER BY created_at ASC LIMIT ?
+      )
+    `).run(cutoff, limit);
+    return Number(result.changes);
   }
 
   /**
@@ -178,6 +216,16 @@ export class SQLiteActivityStore implements ActivityStore {
     // Fast path: check if already exists (avoids INSERT overhead)
     const existing = await this.getByIdempotencyKey(record.ownerId, record.agentId, key);
     if (existing) return { record: existing, created: false };
+
+    // #109: an expired binding of this key no longer suppresses the request,
+    // but it still occupies the UNIQUE index. Clear only its key (never the
+    // row) so the new activity can bind the key. Synchronous, so no other
+    // caller in this process interleaves between this and the INSERT.
+    this.db
+      .prepare(
+        "UPDATE activities SET idempotency_key = NULL WHERE owner_id = ? AND agent_id = ? AND idempotency_key = ? AND created_at < ?"
+      )
+      .run(record.ownerId, record.agentId, key, idempotencyCutoff(this.now(), this.idempotencyWindowMs));
 
     // Atomic INSERT — UNIQUE INDEX enforces single winner
     record.idempotencyKey = key;

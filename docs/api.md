@@ -301,6 +301,21 @@ Headers: optional `Idempotency-Key` (≤256 chars, scoped to owner+agent).
 Same key + same intent → returns the original activity (`200`).
 Same key + different intent → `409`.
 
+Replay window: a key is honoured for **24 hours** from the creation of the
+activity it is bound to. Change it with `IDEMPOTENCY_KEY_WINDOW_SECONDS`
+(default `86400`; an unset, zero, negative or non-numeric value falls back to
+the default), or with the `idempotencyKeyWindowMs` server option.
+
+- Inside the window, both rules above apply: no second execution, no second
+  value movement.
+- After the window, the key is treated as new: the request is evaluated and
+  executed as a fresh intent, with a new activity. The earlier activity is kept
+  in the activity log; only its key stops suppressing requests.
+- Clients should finish retrying well inside the window. To repeat a payment on
+  purpose, send a new key rather than waiting for an old one to expire.
+- The window is anchored to the original activity's creation time, not the time
+  of the last retry, so retrying does not extend it.
+
 Agent status admission: the agent must be `active`. A `paused` or
 `disabled` agent rejects new intents before any activity, approval,
 execution, or queue record is created:

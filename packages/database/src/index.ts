@@ -7,6 +7,18 @@ import type {
   ScheduleStatus,
 } from "@4evergent/shared";
 import { clampOffset, clampLimit } from "./pagination.js";
+import {
+  idempotencyCutoff,
+  resolveIdempotencyWindowMs,
+  type ActivityStoreOptions,
+} from "./idempotency-window.js";
+
+export {
+  DEFAULT_IDEMPOTENCY_WINDOW_MS,
+  idempotencyCutoff,
+  resolveIdempotencyWindowMs,
+  type ActivityStoreOptions,
+} from "./idempotency-window.js";
 
 /**
  * ActivityStore — persistence interface for the transaction activity log.
@@ -27,6 +39,12 @@ export interface ActivityStore {
   update(id: string, patch: Partial<ActivityRecord>): Promise<ActivityRecord | null>;
   getByIdempotencyKey(ownerId: string, agentId: string, key: string): Promise<ActivityRecord | null>;
   recordIdempotent(key: string, record: ActivityRecord): Promise<{ record: ActivityRecord; created: boolean }>;
+  /**
+   * #109: release the Idempotency-Key of at most `limit` activities created
+   * before `cutoff` (ISO-8601). Only the key is cleared; the activity record
+   * (the audit trail) is never deleted. Returns the number of keys released.
+   */
+  releaseExpiredIdempotencyKeys?(cutoff: string, limit?: number): Promise<number>;
   /** Atomically reserve daily spending. Returns true if reservation succeeded, false if limit would be exceeded. */
   reserveDailySpending(agentId: string, asset: string, amount: string, limit: string, now?: Date): Promise<boolean>;
   /**
@@ -136,6 +154,14 @@ export class InMemoryActivityStore implements ActivityStore {
   private idempotencyLock: Promise<unknown> = Promise.resolve();
   /** Serializes daily-spending check+commit per store instance (atomicity). */
   private dailySpendingLock: Promise<unknown> = Promise.resolve();
+  /** #109: Idempotency-Key replay window. */
+  readonly idempotencyWindowMs: number;
+  private readonly now: () => number;
+
+  constructor(options: ActivityStoreOptions = {}) {
+    this.idempotencyWindowMs = resolveIdempotencyWindowMs(options.idempotencyWindowMs);
+    this.now = options.now ?? Date.now;
+  }
 
   async record(record: ActivityRecord): Promise<void> {
     this.records.set(record.id, record);
@@ -177,13 +203,40 @@ export class InMemoryActivityStore implements ActivityStore {
     return rec?.ownerId === ownerId ? rec : null;
   }
 
+  /**
+   * #109: only a key bound to an activity created inside the replay window
+   * is returned. An older binding no longer suppresses a new request.
+   */
   async getByIdempotencyKey(ownerId: string, agentId: string, key: string): Promise<ActivityRecord | null> {
+    const cutoff = idempotencyCutoff(this.now(), this.idempotencyWindowMs);
     for (const rec of this.records.values()) {
-      if (rec.ownerId === ownerId && rec.agentId === agentId && rec.idempotencyKey === key) {
+      if (rec.ownerId === ownerId && rec.agentId === agentId && rec.idempotencyKey === key && rec.createdAt >= cutoff) {
         return rec;
       }
     }
     return null;
+  }
+
+  async releaseExpiredIdempotencyKeys(cutoff: string, limit = 500): Promise<number> {
+    let released = 0;
+    for (const rec of this.records.values()) {
+      if (released >= limit) break;
+      if (rec.idempotencyKey && rec.createdAt < cutoff) {
+        rec.idempotencyKey = null;
+        released++;
+      }
+    }
+    return released;
+  }
+
+  /** Clear the key of an expired binding so the key can be bound again (#109). */
+  private releaseExpiredBinding(ownerId: string, agentId: string, key: string): void {
+    const cutoff = idempotencyCutoff(this.now(), this.idempotencyWindowMs);
+    for (const rec of this.records.values()) {
+      if (rec.ownerId === ownerId && rec.agentId === agentId && rec.idempotencyKey === key && rec.createdAt < cutoff) {
+        rec.idempotencyKey = null;
+      }
+    }
   }
 
   /**
@@ -197,6 +250,7 @@ export class InMemoryActivityStore implements ActivityStore {
     const result = this.idempotencyLock.then(async () => {
       const existing = await this.getByIdempotencyKey(record.ownerId, record.agentId, key);
       if (existing) return { record: existing, created: false };
+      this.releaseExpiredBinding(record.ownerId, record.agentId, key);
       record.idempotencyKey = key;
       this.records.set(record.id, record);
       return { record, created: true };
