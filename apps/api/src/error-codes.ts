@@ -15,6 +15,7 @@ export const API_ERRORS = {
   INVALID_PATH_PARAM: { status: 400, message: "Invalid path parameter", description: "A path identifier is missing or malformed." },
   INVALID_JSON: { status: 400, message: "Invalid JSON body", description: "The request body is not valid JSON." },
   VALIDATION_ERROR: { status: 400, message: "Validation failed", description: "A field failed validation; see message and optional details." },
+  POLICY_UNAVAILABLE: { status: 503, message: "Policy configuration unavailable", description: "The stored policy could not be read safely; no fallback policy was applied." },
   RAW_TRANSACTION_REJECTED: { status: 400, message: "Raw XDR and transaction blobs are not accepted; submit a typed intent", description: "Raw transaction payloads are not accepted." },
   IDEMPOTENCY_KEY_INVALID: { status: 400, message: "Idempotency-Key must be 256 characters or fewer", description: "The Idempotency-Key header is too long." },
   IDEMPOTENCY_CONFLICT: { status: 409, message: "Idempotency-Key already used with a different intent", description: "The Idempotency-Key was already used with a different intent." },
