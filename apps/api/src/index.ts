@@ -598,6 +598,30 @@ export async function createApiServer(options: ServerOptions) {
           // keep using execute().
           let outcome: Awaited<ReturnType<typeof pipeline.executeApproved>>;
           if (record.approvalId) {
+            const approval = await approvals.get(record.approvalId);
+            if (approval && (approval.status === "expired" || (approval.expiresAt && new Date(approval.expiresAt) < new Date()))) {
+              return {
+                record,
+                success: false,
+                status: "failed",
+                error: "approval expired without decision",
+                errorClass: "permanent",
+                activityId: approval.activityId ?? record.activityId ?? undefined,
+                approvalId: record.approvalId,
+                policyDecision: approval.policyDecision,
+              };
+            }
+            if (approval && approval.status === "pending_approval") {
+              return {
+                record,
+                success: false,
+                status: "requires_approval",
+                error: approval.policyDecision?.reason ?? "requires approval",
+                activityId: approval.activityId ?? record.activityId ?? undefined,
+                approvalId: record.approvalId,
+                policyDecision: approval.policyDecision,
+              };
+            }
             outcome = await pipeline.executeApproved(record.approvalId, undefined, {
               signal: context?.signal,
               onBeforeSubmit: () => {
@@ -605,7 +629,29 @@ export async function createApiServer(options: ServerOptions) {
               },
             });
           } else {
-            const sourceAccount = await getSourceAccount();
+            // #351: if an approval is already pending for this activity, do not duplicate
+            if (record.activityId) {
+              const pendingApprovals = await approvals.listByAgent(record.agentId, 50, 0, "pending_approval");
+              const existingApproval = pendingApprovals.find((a) => a.activityId === record.activityId);
+              if (existingApproval) {
+                return {
+                  record,
+                  success: false,
+                  status: "requires_approval",
+                  error: existingApproval.policyDecision?.reason ?? "requires approval",
+                  activityId: record.activityId,
+                  approvalId: existingApproval.id,
+                  policyDecision: existingApproval.policyDecision,
+                };
+              }
+            }
+
+            const baseSourceAccount = await getSourceAccount();
+            const sourceAccount = {
+              ...baseSourceAccount,
+              agentId: record.agentId,
+              ownerId: record.ownerId,
+            };
             if (context?.signal?.aborted) {
               const err = new Error("Execution was cancelled");
               err.name = "AbortError";
@@ -625,6 +671,7 @@ export async function createApiServer(options: ServerOptions) {
           if (txHash) {
             await context?.onSubmitted?.(txHash);
           }
+          const approvalId = (outcome as { approvalId?: string }).approvalId ?? record.approvalId ?? undefined;
           return {
             record,
             success: outcome.status === "submitted",
@@ -634,6 +681,8 @@ export async function createApiServer(options: ServerOptions) {
             txHash,
             submittedHash: txHash ?? null,
             activityId: (outcome as { activityId?: string }).activityId ?? record.activityId ?? undefined,
+            approvalId,
+            policyDecision: outcome.policyDecision ?? undefined,
           };
         } catch (err: unknown) {
           if (context?.signal?.aborted) {
@@ -863,6 +912,15 @@ export async function createApiServer(options: ServerOptions) {
           batchSize: 500,
           onApprovalExpired: async (approval) => {
             await releaseDecisionReservation(approval.agentId, approval.policyDecision);
+            const linkedExecution = await executionStore.getByApprovalId(approval.id);
+            if (linkedExecution && linkedExecution.status === "requires_approval") {
+              await executionStore.updateIfStatus(linkedExecution.id, "requires_approval", {
+                status: "failed",
+                error: "approval expired without decision",
+                completedAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+              });
+            }
           },
         });
         console.log(`[retention] sweep complete: auth_sessions=${result.authSessionsRemoved}, daily_spending=${result.dailySpendingRemoved}, expired_approvals=${result.expiredApprovalsSwept}`);
@@ -1703,6 +1761,23 @@ export async function createApiServer(options: ServerOptions) {
     return json(res, { schedule: updated });
   }
 
+  async function syncExecutionApprovalExpiry(execution: ExecutionRecord): Promise<void> {
+    if (execution.status === "requires_approval" && execution.approvalId) {
+      const approval = await approvals.get(execution.approvalId);
+      if (approval && (approval.status === "expired" || (approval.expiresAt && new Date(approval.expiresAt) < new Date()))) {
+        await executionStore.updateIfStatus(execution.id, "requires_approval", {
+          status: "failed",
+          error: "approval expired without decision",
+          completedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+        execution.status = "failed";
+        execution.error = "approval expired without decision";
+        execution.completedAt = new Date().toISOString();
+      }
+    }
+  }
+
   async function handleAgentExecutions(ctx: RequestContext, req: any, res: any) {
     const urlObj = new URL(req.url ?? "", "http://localhost");
     const match = urlObj.pathname.match(/^\/agents\/([^/]+)\/executions$/);
@@ -1714,6 +1789,9 @@ export async function createApiServer(options: ServerOptions) {
     const offset = Math.max(0, Number(urlObj.searchParams.get("offset") ?? 0) || 0);
     const all = await executionStore.listByAgent(agentId, limit + 1, offset);
     const executions = all.slice(0, limit);
+    for (const e of executions) {
+      await syncExecutionApprovalExpiry(e);
+    }
     const hasMore = all.length > limit && !isOffsetAtCeiling(offset);
     return json(res, { agentId, executions, hasMore });
   }
@@ -1725,6 +1803,7 @@ export async function createApiServer(options: ServerOptions) {
     if (!executionId) return apiError(res, "INVALID_PATH_PARAM");
     const execution = await executionStore.getForOwner(executionId, ctx.ownerId!);
     if (!execution) return apiError(res, "EXECUTION_NOT_FOUND");
+    await syncExecutionApprovalExpiry(execution);
     return json(res, { execution });
   }
 
@@ -1769,6 +1848,9 @@ export async function createApiServer(options: ServerOptions) {
     const offset = Math.max(0, Number(urlObj.searchParams.get("offset") ?? 0) || 0);
     const all = await executionStore.listByOwner(ctx.ownerId!, limit + 1, offset);
     const executions = all.slice(0, limit);
+    for (const e of executions) {
+      await syncExecutionApprovalExpiry(e);
+    }
     const hasMore = all.length > limit && !isOffsetAtCeiling(offset);
     return json(res, { executions, hasMore });
   }
@@ -2111,29 +2193,40 @@ export async function createApiServer(options: ServerOptions) {
     if (options.deferExecution) {
       // execution deferred intentionally — no action taken here
     } else if (executionQueue) {
-      const now = new Date().toISOString();
-      const executionRecord: ExecutionRecord = {
-        id: crypto.randomUUID(),
-        ownerId: approval.ownerId,
-        agentId: approval.agentId,
-        approvalId,
-        activityId: approval.activityId,
-        intent: approval.intent,
-        status: "queued",
-        policyDecision: approval.policyDecision,
-        simulationResult: null,
-        txHash: null,
-        submittedHash: null,
-        error: null,
-        attempt: 0,
-        nextRetryAt: null,
-        startedAt: null,
-        completedAt: null,
-        errorClass: null,
-        createdAt: now,
-        updatedAt: now,
-      };
-      void executionQueue.enqueue(executionRecord);
+      // #351: if an execution record already exists in requires_approval for this approval,
+      // transition it to queued rather than creating a duplicate record.
+      const existing = await executionStore.getByApprovalId(approvalId);
+      if (existing && existing.status === "requires_approval") {
+        await executionStore.updateIfStatus(existing.id, "requires_approval", {
+          status: "queued",
+          approvalId,
+          updatedAt: new Date().toISOString(),
+        });
+      } else {
+        const now = new Date().toISOString();
+        const executionRecord: ExecutionRecord = {
+          id: crypto.randomUUID(),
+          ownerId: approval.ownerId,
+          agentId: approval.agentId,
+          approvalId,
+          activityId: approval.activityId,
+          intent: approval.intent,
+          status: "queued",
+          policyDecision: approval.policyDecision,
+          simulationResult: null,
+          txHash: null,
+          submittedHash: null,
+          error: null,
+          attempt: 0,
+          nextRetryAt: null,
+          startedAt: null,
+          completedAt: null,
+          errorClass: null,
+          createdAt: now,
+          updatedAt: now,
+        };
+        void executionQueue.enqueue(executionRecord);
+      }
     } else {
       // Fallback: Phase 8 fire-and-forget behavior
       // Phase 26A: Must also use sequence coordinator
@@ -2197,6 +2290,16 @@ export async function createApiServer(options: ServerOptions) {
       return approvalError(res, "APPROVAL_CONFLICT", { approvalId, activityId: approval.activityId, status: current?.status ?? approval.status, message: `approval already decided (now ${current?.status ?? approval.status}); refresh before retrying` });
     }
     await store.update(approval.activityId, { status: "rejected", authorizationStatus: "denied_by_approver", error: "approval rejected by human" });
+    // #351: if a linked execution exists in requires_approval, mark it failed
+    const linkedExecution = await executionStore.getByApprovalId(approvalId);
+    if (linkedExecution && linkedExecution.status === "requires_approval") {
+      await executionStore.updateIfStatus(linkedExecution.id, "requires_approval", {
+        status: "failed",
+        error: "approval rejected by human",
+        completedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+    }
     // #353: rejected approval will never execute — release the reservation
     // made when the intent was created.
     await releaseDecisionReservation(approval.agentId, approval.policyDecision);

@@ -23,6 +23,13 @@ export class InMemoryExecutionStore implements ExecutionStore {
     return this.records.get(id) ?? null;
   }
 
+  async getByApprovalId(approvalId: string): Promise<ExecutionRecord | null> {
+    for (const r of this.records.values()) {
+      if (r.approvalId === approvalId) return r;
+    }
+    return null;
+  }
+
   async getForOwner(id: string, ownerId: string): Promise<ExecutionRecord | null> {
     const rec = this.records.get(id);
     return rec?.ownerId === ownerId ? rec : null;
@@ -88,7 +95,7 @@ export class InMemoryExecutionStore implements ExecutionStore {
     const result: Record<ExecutionStatus, number> = {
       queued: 0, executing: 0, submitted: 0,
       confirmed: 0, failed: 0, dead_letter: 0,
-      cancelled: 0,
+      cancelled: 0, requires_approval: 0,
     };
     for (const [status, count] of Object.entries(counts)) {
       if (status in result) {
@@ -288,6 +295,7 @@ export class SQLiteExecutionStore implements ExecutionStore {
       CREATE INDEX IF NOT EXISTS idx_executions_agent ON executions(agent_id);
       CREATE INDEX IF NOT EXISTS idx_executions_status ON executions(status);
       CREATE INDEX IF NOT EXISTS idx_executions_next_retry ON executions(next_retry_at);
+      CREATE INDEX IF NOT EXISTS idx_executions_approval ON executions(approval_id);
     `);
     } catch (err) {
       throw new MigrationError("executions", null, err);
@@ -336,6 +344,13 @@ export class SQLiteExecutionStore implements ExecutionStore {
 
   async get(id: string): Promise<ExecutionRecord | null> {
     const row = this.db.prepare("SELECT * FROM executions WHERE id = ?").get(id) as unknown as ExecutionRow | undefined;
+    return row ? rowToExecutionRecord(row) : null;
+  }
+
+  async getByApprovalId(approvalId: string): Promise<ExecutionRecord | null> {
+    const row = this.db
+      .prepare("SELECT * FROM executions WHERE approval_id = ? ORDER BY created_at DESC LIMIT 1")
+      .get(approvalId) as unknown as ExecutionRow | undefined;
     return row ? rowToExecutionRecord(row) : null;
   }
 
@@ -403,7 +418,7 @@ export class SQLiteExecutionStore implements ExecutionStore {
     const result: Record<ExecutionStatus, number> = {
       queued: 0, executing: 0, submitted: 0,
       confirmed: 0, failed: 0, dead_letter: 0,
-      cancelled: 0,
+      cancelled: 0, requires_approval: 0,
     };
     for (const row of rows) {
       const s = row.status as ExecutionStatus;

@@ -11,6 +11,8 @@ export interface ExecutionResult {
   submittedHash?: string | null;
   /** ActivityRecord id updated by the pipeline for schedule-driven executions. */
   activityId?: string;
+  approvalId?: string;
+  policyDecision?: any;
 }
 
 /**
@@ -407,6 +409,41 @@ export class ExecutionQueue {
   }
 
   private async complete(record: ExecutionRecord, result: ExecutionResult): Promise<void> {
+    // #351: requires_approval is a waiting-for-approval state, not a failure.
+    // Do not retry, do not dead_letter, and store the created approvalId.
+    if (result.status === "requires_approval") {
+      const update: Partial<ExecutionRecord> = {
+        status: "requires_approval",
+        approvalId: result.approvalId ?? record.approvalId ?? null,
+        activityId: result.activityId ?? record.activityId ?? null,
+        policyDecision: result.policyDecision ?? record.policyDecision ?? null,
+        error: null,
+        nextRetryAt: null,
+        errorClass: null,
+        completedAt: null,
+        updatedAt: new Date().toISOString(),
+      };
+      await this.store.updateIfStatus(record.id, "executing", update);
+      return;
+    }
+
+    // #351: if approval expired, mark execution failed without retry
+    if (result.status === "failed" && result.error === "approval expired without decision") {
+      const update: Partial<ExecutionRecord> = {
+        status: "failed",
+        approvalId: result.approvalId ?? record.approvalId ?? null,
+        activityId: result.activityId ?? record.activityId ?? null,
+        policyDecision: result.policyDecision ?? record.policyDecision ?? null,
+        error: "approval expired without decision",
+        nextRetryAt: null,
+        errorClass: "permanent",
+        completedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      await this.store.updateIfStatus(record.id, "executing", update);
+      return;
+    }
+
     const update: Record<string, unknown> = {
       status: result.status as ExecutionRecord["status"],
       txHash: result.txHash ?? null,
@@ -423,6 +460,12 @@ export class ExecutionQueue {
     };
     if (result.activityId) {
       update.activityId = result.activityId;
+    }
+    if (result.approvalId) {
+      update.approvalId = result.approvalId;
+    }
+    if (result.policyDecision) {
+      update.policyDecision = result.policyDecision;
     }
     if (result.success) {
       await this.store.updateIfStatus(record.id, "executing", update as Partial<ExecutionRecord>);
@@ -462,6 +505,7 @@ export class ExecutionQueue {
       errorClass: classification,
       updatedAt: new Date().toISOString(),
       ...(extraUpdate?.activityId ? { activityId: extraUpdate.activityId } : {}),
+      ...(extraUpdate?.approvalId ? { approvalId: extraUpdate.approvalId } : {}),
       ...(txHash ? { txHash } : {}),
       ...(submittedHash ? { submittedHash } : {}),
     } as Partial<ExecutionRecord>);

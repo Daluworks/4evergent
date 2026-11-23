@@ -222,6 +222,19 @@ export class TransactionPipeline {
             approvalId,
           };
         }
+        // #351: deduplicate on existing pending approval for this activity (e.g. schedule re-run)
+        const existingApprovalId = await this.findApprovalIdForActivity(agentId, persisted.activityId);
+        if (existingApprovalId) {
+          await this.releaseReservation(agentId, decision);
+          return {
+            status: "requires_approval",
+            message: decision.reason,
+            policyDecision: decision,
+            simulationResult: null,
+            activityId: persisted.activityId,
+            approvalId: existingApprovalId,
+          };
+        }
         const expiresAt = new Date(Date.now() + this.approvalTtlSeconds * 1000).toISOString();
         const approval = createApproval(persisted.activityId, agentId, ownerId, intent, decision, expiresAt);
         await this.approvalStore.record(approval);

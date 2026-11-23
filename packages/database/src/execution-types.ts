@@ -18,7 +18,8 @@ export type ExecutionStatus =
   | "confirmed"
   | "failed"
   | "dead_letter"
-  | "cancelled";
+  | "cancelled"
+  | "requires_approval";
 
 export interface ExecutionRecord {
   id: string;
@@ -58,6 +59,7 @@ export interface ExecutionRecord {
 export interface ExecutionStore {
   record(record: ExecutionRecord): Promise<void>;
   get(id: string): Promise<ExecutionRecord | null>;
+  getByApprovalId(approvalId: string): Promise<ExecutionRecord | null>;
   getForOwner(id: string, ownerId: string): Promise<ExecutionRecord | null>;
   listDue(before: string, limit?: number): Promise<ExecutionRecord[]>;
   listByOwner(ownerId: string, limit?: number, offset?: number): Promise<ExecutionRecord[]>;
