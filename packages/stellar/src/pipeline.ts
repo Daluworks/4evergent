@@ -5,7 +5,8 @@ import type { Signer } from "./signer.js";
 import { PolicyEngine } from "@4evergent/policy";
 import { IntentValidator } from "@4evergent/agent-core";
 import { StellarAdapter } from "@4evergent/agent-core";
-import type { AgentIntent, AccountSettingsIntent, PolicyDecision, PolicyRules, ActivityRecord, AgentStatus } from "@4evergent/shared";
+import type { AgentIntent, AccountSettingsIntent, ContractCallIntent, PolicyDecision, PolicyRules, ActivityRecord, AgentStatus } from "@4evergent/shared";
+import type { rpc } from "@stellar/stellar-sdk";
 import {
   createActivity,
   createApproval,
@@ -16,6 +17,8 @@ import {
 
 export interface PipelineOptions {
   horizonUrl: string;
+  sorobanRpcUrl?: string;
+  sorobanServer?: rpc.Server;
   networkPassphrase: string;
   signer: Signer;
   activityStore?: ActivityStore;
@@ -80,7 +83,11 @@ export class TransactionPipeline {
     this.builder = new StellarTransactionBuilder(
       options.baseFeeStroops !== undefined ? { baseFeeStroops: options.baseFeeStroops } : {}
     );
-    this.simulator = new StellarSimulator(options.horizonUrl);
+    this.simulator = new StellarSimulator(
+      options.horizonUrl,
+      undefined,
+      options.sorobanServer ?? options.sorobanRpcUrl
+    );
     this.submitter = new StellarSubmitter(options.horizonUrl);
     this.signer = options.signer;
     this.horizonUrl = options.horizonUrl;
@@ -259,7 +266,9 @@ export class TransactionPipeline {
 
     let tx;
     try {
-      if (intent.type === "trustline") {
+      if (intent.type === "contract_call") {
+        tx = await this.builder.buildContractCall(sourceAccount, intent as ContractCallIntent, this.signer.getNetworkPassphrase());
+      } else if (intent.type === "trustline") {
         tx = await this.builder.buildTrustline(sourceAccount, intent as any, this.signer.getNetworkPassphrase());
       } else if (intent.type === "account_settings") {
         tx = await this.builder.buildAccountSettings(sourceAccount, intent as AccountSettingsIntent, this.signer.getNetworkPassphrase());
@@ -305,6 +314,10 @@ export class TransactionPipeline {
         simulationResult: simResult,
         activityId: persisted.activityId,
       };
+    }
+
+    if ((simResult as any).assembledTransaction) {
+      tx = (simResult as any).assembledTransaction;
     }
 
     checkAbort();
@@ -582,7 +595,9 @@ export class TransactionPipeline {
 
     let tx;
     try {
-      if (intent.type === "account_settings") {
+      if (intent.type === "contract_call") {
+        tx = await this.builder.buildContractCall(sourceAccount, intent as ContractCallIntent, this.signer.getNetworkPassphrase());
+      } else if (intent.type === "account_settings") {
         tx = await this.builder.buildAccountSettings(sourceAccount, intent as AccountSettingsIntent, this.signer.getNetworkPassphrase());
       } else {
         tx = await this.builder.buildPayment(sourceAccount, intent as any, this.signer.getNetworkPassphrase());
@@ -624,6 +639,10 @@ export class TransactionPipeline {
         simulationResult: simResult,
         activityId: approval.activityId,
       };
+    }
+
+    if ((simResult as any).assembledTransaction) {
+      tx = (simResult as any).assembledTransaction;
     }
 
     checkAbort();
