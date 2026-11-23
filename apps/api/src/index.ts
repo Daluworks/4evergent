@@ -91,6 +91,20 @@ interface ApprovalResponse {
 
 const agents = new Map<string, Agent>();
 
+// Validation caps for agent metadata (#84). The capability bounds mirror the
+// on-chain agent-registry contract (contracts/agent-registry/src/lib.rs:
+// MAX_CAPABILITIES, MAX_CAPABILITY_LEN); displayName/description match the
+// POST /agents handler.
+const MAX_AGENT_DISPLAY_NAME_LEN = 100;
+const MAX_AGENT_DESCRIPTION_LEN = 500;
+const MAX_AGENT_CAPABILITY_COUNT = 32;
+const MAX_AGENT_CAPABILITY_LEN = 32;
+const MUTABLE_AGENT_FIELDS: ReadonlySet<string> = new Set([
+  "displayName",
+  "description",
+  "capabilities",
+]);
+
 export { ScheduleRecoveryService, type ScheduleRecoveryResult, type ScheduleRecoveryOptions } from "./schedule-recovery.js";
 
 export function clearAgents() {
@@ -1104,6 +1118,9 @@ export async function createApiServer(options: ServerOptions) {
     if (method === "GET" && /^\/agents\/[^/]+$/.test(url)) {
       return handleGetAgent(requestScopedCtx, req, res);
     }
+    if (method === "PATCH" && /^\/agents\/[^/]+$/.test(url)) {
+      return handleUpdateAgent(requestScopedCtx, req, res);
+    }
     if (method === "GET" && /^\/agents\/[^/]+\/activity(\?.*)?$/.test(url)) {
       return handleAgentActivity(requestScopedCtx, req, res);
     }
@@ -1314,6 +1331,133 @@ export async function createApiServer(options: ServerOptions) {
     agents.set(agent.id, agent);
 
     return json(res, { agent }, 201);
+  }
+
+  /**
+   * PATCH /agents/:id — update the mutable metadata of an agent (#84).
+   *
+   * Accepted fields: displayName, description, capabilities. Everything else
+   * is rejected (400) rather than ignored, so a typo such as `displayname`
+   * cannot silently do nothing. `status` belongs to PATCH /agents/:id/status,
+   * and `stellarAddress` is deliberately immutable: it binds the agent to a
+   * Stellar signer/account, so a signer change must go through the on-chain
+   * registration path instead of a metadata patch.
+   */
+  async function handleUpdateAgent(ctx: RequestContext, req: any, res: any) {
+    const urlObj = new URL(req.url ?? "", "http://localhost");
+    const match = urlObj.pathname.match(/^\/agents\/([^/]+)$/);
+    const agentId = match?.[1];
+    if (!agentId) return apiError(res, "INVALID_PATH_PARAM");
+
+    // Owner-scoped: a non-owner and a nonexistent agent both get the same 404.
+    const allowed = await authorizationService.canAccessAgent(ctx, agentId);
+    if (!allowed) return apiError(res, "AGENT_NOT_FOUND");
+
+    let body: unknown;
+    try {
+      const text = await readBody(req);
+      body = text ? JSON.parse(text) : {};
+    } catch {
+      return apiError(res, "INVALID_JSON");
+    }
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      return apiError(res, "VALIDATION_ERROR", { message: "body must be a JSON object" });
+    }
+    const b = body as Record<string, unknown>;
+
+    if (Object.prototype.hasOwnProperty.call(b, "status")) {
+      return apiError(res, "VALIDATION_ERROR", {
+        message: "status cannot be updated here; use PATCH /agents/:id/status",
+      });
+    }
+    if (Object.prototype.hasOwnProperty.call(b, "stellarAddress")) {
+      return apiError(res, "VALIDATION_ERROR", {
+        message: "stellarAddress is immutable and cannot be updated",
+      });
+    }
+    const unsupported = Object.keys(b).filter((key) => !MUTABLE_AGENT_FIELDS.has(key));
+    if (unsupported.length > 0) {
+      return apiError(res, "VALIDATION_ERROR", {
+        message: `unsupported field(s): ${unsupported.join(", ")}; accepted fields: displayName, description, capabilities`,
+      });
+    }
+
+    const patch: Partial<Agent> = {};
+
+    if (Object.prototype.hasOwnProperty.call(b, "displayName")) {
+      const displayName = b.displayName;
+      if (typeof displayName !== "string" || displayName.trim().length === 0) {
+        return apiError(res, "VALIDATION_ERROR", { message: "displayName must be a non-empty string" });
+      }
+      if (displayName.trim().length > MAX_AGENT_DISPLAY_NAME_LEN) {
+        return apiError(res, "VALIDATION_ERROR", {
+          message: `displayName must be ${MAX_AGENT_DISPLAY_NAME_LEN} characters or fewer`,
+        });
+      }
+      patch.displayName = displayName.trim();
+    }
+
+    if (Object.prototype.hasOwnProperty.call(b, "description")) {
+      const description = b.description;
+      if (typeof description !== "string") {
+        return apiError(res, "VALIDATION_ERROR", { message: "description must be a string" });
+      }
+      if (description.length > MAX_AGENT_DESCRIPTION_LEN) {
+        return apiError(res, "VALIDATION_ERROR", {
+          message: `description must be ${MAX_AGENT_DESCRIPTION_LEN} characters or fewer`,
+        });
+      }
+      patch.description = description;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(b, "capabilities")) {
+      const rawCapabilities = b.capabilities;
+      if (
+        !Array.isArray(rawCapabilities) ||
+        !rawCapabilities.every((cap): cap is string => typeof cap === "string")
+      ) {
+        return apiError(res, "VALIDATION_ERROR", { message: "capabilities must be an array of strings" });
+      }
+      if (rawCapabilities.length > MAX_AGENT_CAPABILITY_COUNT) {
+        return apiError(res, "VALIDATION_ERROR", {
+          message: `capabilities must be ${MAX_AGENT_CAPABILITY_COUNT} entries or fewer`,
+        });
+      }
+      const trimmedCapabilities: string[] = [];
+      const seen = new Set<string>();
+      for (const capability of rawCapabilities) {
+        const trimmed = capability.trim();
+        if (trimmed.length === 0) {
+          return apiError(res, "VALIDATION_ERROR", { message: "capability entries cannot be empty" });
+        }
+        if (trimmed.length > MAX_AGENT_CAPABILITY_LEN) {
+          return apiError(res, "VALIDATION_ERROR", {
+            message: `capability entries must be ${MAX_AGENT_CAPABILITY_LEN} characters or fewer`,
+          });
+        }
+        if (seen.has(trimmed)) {
+          return apiError(res, "VALIDATION_ERROR", { message: "capabilities must not contain duplicate entries" });
+        }
+        seen.add(trimmed);
+        trimmedCapabilities.push(trimmed);
+      }
+      patch.capabilities = trimmedCapabilities;
+    }
+
+    if (Object.keys(patch).length === 0) {
+      return apiError(res, "VALIDATION_ERROR", {
+        message: "at least one of displayName, description, capabilities is required",
+      });
+    }
+
+    const updated = await agentStore.update(agentId, patch);
+    if (!updated) return apiError(res, "AGENT_NOT_FOUND");
+    // The session-scoped map is used by the status and scheduler lookups; keep
+    // it consistent with the store (same as the status handler).
+    if (agents.has(agentId)) {
+      agents.set(agentId, updated);
+    }
+    return json(res, { agent: updated });
   }
 
   async function handleAgentActivity(ctx: RequestContext, req: any, res: any) {

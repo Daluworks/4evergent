@@ -272,6 +272,50 @@ Match semantics:
 
 Get one agent (owner-scoped). `404` if not found or not owned.
 
+### PATCH /agents/:id
+
+Update an agent's mutable metadata. Auth: owner-scoped; a caller who does not
+own the agent gets the same `404` as for a nonexistent agent.
+
+Body: a JSON object with **at least one** of the fields below (all three may
+be sent together).
+
+| Field | Type | Rules |
+|---|---|---|
+| `displayName` | string | Optional; when supplied, non-empty after trimming and ≤100 characters (trimmed). Stored trimmed. |
+| `description` | string | Optional; may be empty; ≤500 characters. |
+| `capabilities` | string[] | Optional; ≤32 entries; each entry non-empty after trimming, ≤32 characters, and unique after trimming. The stored list is the trimmed list. |
+
+The capability caps are the same numeric limits the on-chain
+`agent-registry` contract enforces (`MAX_CAPABILITIES = 32`,
+`MAX_CAPABILITY_LEN = 32` in `contracts/agent-registry/src/lib.rs`), so an
+agent accepted here can be registered on-chain without tripping them. Two
+differences remain, and are intentional: this endpoint trims entries before
+checking length/uniqueness (the contract compares exact bytes, untrimmed), and
+it caps `displayName` at 100 characters while the contract allows 128 bytes.
+On-chain lengths are UTF-8 bytes whereas this endpoint measures UTF-16 code
+units, so a capability made of multi-byte characters can pass here and still
+be rejected on-chain.
+
+Fields that are **rejected** with `400 VALIDATION_ERROR`:
+
+- `status` — use `PATCH /agents/:id/status` instead.
+- `stellarAddress` — immutable. It binds the agent to a Stellar signer/account,
+  so changing it would repoint the agent's signing identity; register a new
+  agent with the desired address instead.
+- Any other field (`id`, `ownerId`, `active`, `metadata`, or a typo such as
+  `displayname`). Unknown fields are rejected rather than ignored, so a
+  misspelled field cannot silently do nothing.
+
+Responses:
+
+- `200` → `{ "agent": AgentRecord }` with the updated record. The same values
+  are returned by a subsequent `GET /agents/:id`.
+- `400` → invalid JSON; body not an object; no updatable field supplied; a
+  supplied field fails the rules above; `status`, `stellarAddress`, or an
+  unknown field present.
+- `404` → agent does not exist or is not owned by the caller.
+
 ### PATCH /agents/:id/status
 
 Body: `{ "status": "active" | "paused" | "disabled" }`
