@@ -35,6 +35,14 @@ binding, the single-process in-memory state, and session persistence — are
 recorded as ADRs 016–019 in [architecture.md](architecture.md). Rate limiting
 for the login endpoints is ADR-020 (Proposed).
 
+When the per-source request budget is exhausted, the auth gate returns HTTP
+`429` with the standard `{ code, error }` envelope and a `Retry-After` header
+indicating how many seconds to wait before retrying:
+
+```json
+{"code":"RATE_LIMITED","error":"rate_limited"}
+```
+
 ### GET /auth/config
 
 Public. Returns which login methods the server has enabled:
@@ -152,6 +160,7 @@ the approval fields (`approvalId`, `activityId`, `status`, `message`). Request b
 | `SCHEDULE_INVALID_TRANSITION` | 409 | The schedule status does not allow the requested pause, resume or disable. |
 | `EXECUTION_CONFLICT` | 409 | The execution changed concurrently. |
 | `APPROVAL_EXPIRED` | 410 | The approval passed its expiry before it was approved. |
+| `RATE_LIMITED` | 429 | Too many requests from this source. Retry after the number of seconds in the `Retry-After` response header. |
 
 ---
 
