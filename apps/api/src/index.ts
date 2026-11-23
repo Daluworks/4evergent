@@ -728,6 +728,8 @@ export async function createApiServer(options: ServerOptions) {
         };
       },
       pipelineExecutor: (input) => pipeline.execute(input) as any,
+      sequenceCoordinator,
+      sequenceAccountId: options.signer.getAccountId(),
     });
 
     const agentStatusStore = {
