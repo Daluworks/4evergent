@@ -618,7 +618,7 @@ test("ambiguous submission recovery: executing record with txHash found on-chain
   const recoveryService = new ExecutionRecoveryService(store, {
     preCheck: async (txHash) => {
       assert.equal(txHash, "tx-hash-confirmed-1");
-      return "found";
+      return "confirmed";
     },
   });
 
