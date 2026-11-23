@@ -6,6 +6,7 @@ import type {
   PolicyDecision,
   SimulationResult,
 } from "@4evergent/shared";
+import { toStroops } from "@4evergent/shared";
 import { getSharedConnection, closeSharedConnection } from "./shared-connection.js";
 import { clampOffset, clampLimit } from "./pagination.js";
 import { ensureTable, MigrationError } from "./migration.js";
@@ -75,6 +76,13 @@ export class SQLiteActivityStore implements ActivityStore {
     // so the server could start healthy on a database without this table.
     // CREATE TABLE IF NOT EXISTS never throws "already exists", so any
     // error here is real and must abort startup (MigrationError).
+    //
+    // #374: `total` is INTEGER stroops (1 XLM = 10^7 stroops), not REAL XLM.
+    // Binary floats cannot represent most decimal amounts exactly, so a REAL
+    // total drifted the ledger and falsely denied exact-limit intents
+    // (0.1 + 0.2 = 0.30000000000000004 > 0.3). Integer stroops compare
+    // exactly to the stroop. The migration below reinterprets any pre-#374
+    // REAL column as INTEGER stroops.
     ensureTable(
       this.db,
       "daily_spending",
@@ -83,12 +91,78 @@ export class SQLiteActivityStore implements ActivityStore {
           agent_id TEXT NOT NULL,
           asset TEXT NOT NULL,
           day TEXT NOT NULL,
-          total REAL NOT NULL DEFAULT 0,
+          total INTEGER NOT NULL DEFAULT 0,
           PRIMARY KEY (agent_id, asset, day)
         );
       CREATE INDEX IF NOT EXISTS idx_daily_spending_day ON daily_spending(day);
       `
     );
+    // #374: migrate a legacy REAL total column (decimal XLM) to INTEGER
+    // stroops in place, so existing reservations survive the upgrade and
+    // the integer comparison path works. No-op once the column is INTEGER.
+    this.migrateDailySpendingToStroops();
+  }
+
+  /**
+   * #374: convert a pre-#374 `daily_spending` table whose `total` column is
+   * REAL (decimal XLM) to the INTEGER-stroops representation.
+   *
+   * `CREATE TABLE IF NOT EXISTS` above is a no-op on an existing table, so a
+   * database created by an older release keeps its REAL column — and its rows
+   * hold decimal XLM totals. Storing integer stroops alongside those would
+   * mix units (0.3 XLM + 3000000 stroops = nonsense), so the column and its
+   * data are rebuilt together: `ROUND(total * 1e7)` converts each old XLM
+   * total to stroops (this is a one-time migration, not the enforcement path,
+   * so float arithmetic here is acceptable; the result is a clean integer).
+   *
+   * SQLite cannot ALTER a column type, so the table is recreated within a
+   * single transaction (atomic: a failure rolls back to the original REAL
+   * table and aborts startup via MigrationError, never leaving a half-migrated
+   * database). Idempotent: once the column is INTEGER the PRAGMA check skips
+   * this entirely.
+   */
+  private migrateDailySpendingToStroops(): void {
+    const cols = this.db.prepare("PRAGMA table_info(daily_spending)").all() as
+      | { name: string; type: string }[]
+      | undefined;
+    if (!cols) return;
+    const totalCol = cols.find((c) => c.name === "total");
+    if (!totalCol) return; // table absent — ensureTable would have created it
+    if (/integer/i.test(totalCol.type)) return; // already stroops
+
+    try {
+      this.db.exec("BEGIN IMMEDIATE");
+      // Drop a stale rebuild table from any prior interrupted attempt so the
+      // CREATE below is clean (the transaction makes this safe).
+      this.db.exec("DROP TABLE IF EXISTS daily_spending_stroops");
+      this.db.exec(`
+        CREATE TABLE daily_spending_stroops (
+          agent_id TEXT NOT NULL,
+          asset TEXT NOT NULL,
+          day TEXT NOT NULL,
+          total INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (agent_id, asset, day)
+        )
+      `);
+      this.db
+        .prepare(
+          `INSERT INTO daily_spending_stroops (agent_id, asset, day, total)
+           SELECT agent_id, asset, day, CAST(ROUND(total * 10000000) AS INTEGER)
+           FROM daily_spending`
+        )
+        .run();
+      this.db.exec("DROP TABLE daily_spending");
+      this.db.exec("ALTER TABLE daily_spending_stroops RENAME TO daily_spending");
+      this.db.exec("CREATE INDEX IF NOT EXISTS idx_daily_spending_day ON daily_spending(day)");
+      this.db.exec("COMMIT");
+    } catch (err) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // Best-effort rollback; the MigrationError below carries the cause.
+      }
+      throw new MigrationError("daily_spending", "total", err);
+    }
   }
 
   async record(record: ActivityRecord): Promise<void> {
@@ -230,9 +304,14 @@ export class SQLiteActivityStore implements ActivityStore {
    * (agent_id, asset, day) ensures one row per asset per day.
    */
   async reserveDailySpending(agentId: string, asset: string, amount: string, limit: string, now = new Date()): Promise<boolean> {
-    const amountNum = parseFloat(amount);
-    const limitNum = parseFloat(limit);
-    if (isNaN(amountNum) || isNaN(limitNum)) return false;
+    // #374: compare integer stroops, not REAL XLM. parseFloat/float addition
+    // drifts the ledger and falsely denies exact-limit intents
+    // (0.1 + 0.2 stroops = 3_000_000 == 0.3 limit stroops, allowed). A
+    // non-canonical amount/limit returns null and is rejected, matching the
+    // strict parser (#264).
+    const amountStroops = toStroops(amount);
+    const limitStroops = toStroops(limit);
+    if (amountStroops === null || limitStroops === null) return false;
 
     const day = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
       .toISOString()
@@ -244,7 +323,7 @@ export class SQLiteActivityStore implements ActivityStore {
         `UPDATE daily_spending SET total = total + ?
          WHERE agent_id = ? AND asset = ? AND day = ? AND total + ? <= ?`
       )
-      .run(amountNum, agentId, asset, day, amountNum, limitNum);
+      .run(amountStroops, agentId, asset, day, amountStroops, limitStroops);
 
     if (updateResult.changes === 1) {
       return true; // Reservation succeeded
@@ -254,7 +333,7 @@ export class SQLiteActivityStore implements ActivityStore {
     // #353: check the limit BEFORE inserting. The old code inserted first
     // and returned false afterwards, persisting an over-limit row that
     // bricked the asset for the rest of the day.
-    if (amountNum > limitNum) {
+    if (amountStroops > limitStroops) {
       return false; // First reservation already over limit — persist nothing.
     }
 
@@ -264,7 +343,7 @@ export class SQLiteActivityStore implements ActivityStore {
         .prepare(
           `INSERT INTO daily_spending (agent_id, asset, day, total) VALUES (?, ?, ?, ?)`
         )
-        .run(agentId, asset, day, amountNum);
+        .run(agentId, asset, day, amountStroops);
       return true;
     } catch (_e: any) {
       // PRIMARY KEY conflict — row was created by concurrent caller between our UPDATE and INSERT,
@@ -275,7 +354,7 @@ export class SQLiteActivityStore implements ActivityStore {
           `UPDATE daily_spending SET total = total + ?
            WHERE agent_id = ? AND asset = ? AND day = ? AND total + ? <= ?`
         )
-        .run(amountNum, agentId, asset, day, amountNum, limitNum);
+        .run(amountStroops, agentId, asset, day, amountStroops, limitStroops);
       return retryResult.changes === 1;
     }
   }
@@ -286,8 +365,9 @@ export class SQLiteActivityStore implements ActivityStore {
    * release amounts proven reserved (PolicyDecision.reservedDailySpending).
    */
   async releaseDailySpending(agentId: string, asset: string, amount: string, now = new Date()): Promise<void> {
-    const amountNum = parseFloat(amount);
-    if (isNaN(amountNum) || amountNum <= 0) return;
+    // #374: release integer stroops, matching the reservation unit.
+    const amountStroops = toStroops(amount);
+    if (amountStroops === null || amountStroops <= 0) return;
 
     const day = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
       .toISOString()
@@ -298,7 +378,7 @@ export class SQLiteActivityStore implements ActivityStore {
         `UPDATE daily_spending SET total = MAX(total - ?, 0)
          WHERE agent_id = ? AND asset = ? AND day = ?`
       )
-      .run(amountNum, agentId, asset, day);
+      .run(amountStroops, agentId, asset, day);
     this.db
       .prepare(
         `DELETE FROM daily_spending
@@ -307,6 +387,13 @@ export class SQLiteActivityStore implements ActivityStore {
       .run(agentId, asset, day);
   }
 
+  /**
+   * #374: returns the current UTC day's reserved total in INTEGER STROOPS
+   * (1 XLM = 10^7 stroops), or null when nothing is reserved. Callers that
+   * need a decimal amount convert at the boundary via `fromStroops`; the
+   * enforcement path compares these integers directly against integer
+   * stroop limits.
+   */
   async getDailySpending(agentId: string, asset: string, now = new Date()): Promise<number | null> {
     const day = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
       .toISOString().slice(0, 10);

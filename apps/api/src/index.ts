@@ -8,6 +8,7 @@ import type {
   PolicyDecision,
   SimulationResult,
 } from "@4evergent/shared";
+import { toStroops, fromStroops } from "@4evergent/shared";
 import { API_ERRORS, type ApiErrorCode } from "./error-codes.js";
 import { IntentValidator } from "@4evergent/agent-core";
 import { PolicyEngine, DEFAULT_RULES, validatePolicyRules, normalizePolicyRules, parseStrictAmount } from "@4evergent/policy";
@@ -1391,13 +1392,19 @@ export async function createApiServer(options: ServerOptions) {
     const spending: Record<string, { used: number; limit: string; remaining: number }> = {};
     for (const asset of Object.keys(rules.dailySpendingLimit)) {
       const limitStr = rules.dailySpendingLimit[asset] ?? "0";
-      const limitNum = parseFloat(limitStr);
-      if (isNaN(limitNum)) continue;
-      const used = (await store.getDailySpending(agentId, asset)) ?? 0;
+      // #374: enforce and store in integer stroops; convert stroops back to an
+      // exact decimal number here at the display boundary so the dashboard
+      // never shows float garbage like 0.19999999999999998 (which 1.0 - 0.8
+      // produced under the old REAL/float path). A non-canonical limit is
+      // skipped (no row), matching the old isNaN(parseFloat) behavior.
+      const limitStroops = toStroops(limitStr);
+      if (limitStroops === null) continue;
+      const usedStroops = (await store.getDailySpending(agentId, asset)) ?? 0;
+      const remainingStroops = Math.max(limitStroops - usedStroops, 0);
       spending[asset] = {
-        used,
+        used: Number(fromStroops(usedStroops)),
         limit: limitStr,
-        remaining: Math.max(limitNum - used, 0),
+        remaining: Number(fromStroops(remainingStroops)),
       };
     }
     return json(res, { agentId, spending });
