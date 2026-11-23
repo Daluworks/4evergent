@@ -266,7 +266,7 @@ export FOREGENT_API_KEY=your-api-key
 4evergent health
 4evergent agent list
 4evergent agent pause <id>
-4evergent approval list
+4evergent approval list --status pending_approval --limit 10
 4evergent approval approve <id>
 4evergent execution list
 4evergent policy get <agent-id>

@@ -49,6 +49,8 @@ export interface CommandDef {
 
 export type CommandTree = Record<string, CommandDef>;
 
+export const APPROVAL_LIST_USAGE = "Usage: 4evergent approval list [--status <status>] [--limit <limit> | <limit>]";
+
 export const INTENT_TYPES = ["payment", "trustline", "contract_call", "account_settings"] as const;
 export type IntentType = (typeof INTENT_TYPES)[number];
 
@@ -66,7 +68,7 @@ export interface CommandTreeHandlers {
     disable: (args: string[]) => Promise<number> | number;
   };
   approval: {
-    list: () => Promise<number> | number;
+    list: (args: string[]) => Promise<number> | number;
     get: (args: string[]) => Promise<number> | number;
     approve: (args: string[]) => Promise<number> | number;
     reject: (args: string[]) => Promise<number> | number;
@@ -173,8 +175,11 @@ export function buildCommandTree(handlers?: CommandTreeHandlers): CommandTree {
       subcommands: {
         list: {
           name: "list",
-          description: "List pending approvals",
-          run: handlers ? () => handlers.approval.list() : undefined,
+          description: "List approvals, optionally filtered by status",
+          usage: APPROVAL_LIST_USAGE,
+          args: [{ name: "limit", description: "Maximum approvals (1-200, default 50)", optional: true }],
+          flags: ["--status", "--limit"],
+          run: handlers?.approval.list,
         },
         get: {
           name: "get",

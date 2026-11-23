@@ -12,10 +12,11 @@
  *   FOREGENT_API_TIMEOUT_MS — Per-request timeout in ms (default: 5000)
  */
 
+import { parseArgs } from "node:util";
 import { exit } from "node:process";
 import { createRequire } from "node:module";
 import { createInterface } from "node:readline";
-import { COMMAND_TREE, COMMANDS_HELP, buildCommandTree, dispatchCommand } from "./commands.js";
+import { APPROVAL_LIST_USAGE, COMMAND_TREE, COMMANDS_HELP, buildCommandTree, dispatchCommand } from "./commands.js";
 import { generateCompletion } from "./completion.js";
 
 // The build replaces this lookup with the package version for a standalone CLI.
@@ -309,9 +310,39 @@ async function cmdAgentStatus(agentId: string, status: "active" | "paused" | "di
   }
 }
 
-async function cmdApprovalList() {
+const approvalStatuses = ["pending_approval", "approved", "rejected", "expired", "executing", "submitted", "confirmed", "failed"];
+
+async function cmdApprovalList(args: string[]) {
+  const params = new URLSearchParams();
   try {
-    const { body } = await request("/approvals");
+    const { values, positionals } = parseArgs({
+      args,
+      options: { status: { type: "string" }, limit: { type: "string" } },
+      allowPositionals: true,
+    });
+    if (values.status !== undefined) {
+      if (!approvalStatuses.includes(values.status)) {
+        throw new Error(`status must be one of: ${approvalStatuses.join(", ")}`);
+      }
+      params.set("status", values.status);
+    }
+    if (positionals.length > 1 || (positionals.length && values.limit !== undefined)) {
+      throw new Error("Specify the limit once, either as --limit or as a positional argument.");
+    }
+    const limit = values.limit ?? positionals[0];
+    if (limit !== undefined) {
+      if (!/^\d+$/.test(limit) || Number(limit) < 1 || Number(limit) > 200) {
+        throw new Error("limit must be an integer between 1 and 200");
+      }
+      params.set("limit", String(Number(limit)));
+    }
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : err);
+    console.error(APPROVAL_LIST_USAGE);
+    return 1;
+  }
+  try {
+    const { body } = await request(params.size ? `/approvals?${params}` : "/approvals");
     if (!body.approvals || body.approvals.length === 0) {
       console.log("No approvals found.");
       return 0;
@@ -1074,7 +1105,7 @@ export const dispatcherTree = buildCommandTree({
     },
   },
   approval: {
-    list: () => cmdApprovalList(),
+    list: cmdApprovalList,
     get: (args) => cmdApprovalGet(args[0] ?? ""),
     approve: (args) => cmdApprovalAction(args[0] ?? "", "approve"),
     reject: (args) => cmdApprovalAction(args[0] ?? "", "reject"),
