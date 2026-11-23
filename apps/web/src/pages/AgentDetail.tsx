@@ -7,6 +7,7 @@ import type { AgentRecord, ActivityRecord, PolicyRules } from '../types';
 import { ScheduleManagement } from './ScheduleManagement';
 import { ExecutionList } from './ExecutionList';
 import { AgentName, StatusBadge, Skeleton, EmptyState } from '../components';
+import { validateStellarAddressField, validateAssetCodeField } from '../validation';
 
 type SpendingData = Record<string, { used: number; limit: string; remaining: number }>;
 
@@ -208,6 +209,8 @@ function PolicySettings({ agentId }: { agentId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [form, setForm] = useState<PolicyRules | null>(null);
+  const [destinationChipError, setDestinationChipError] = useState<string | null>(null);
+  const [assetChipError, setAssetChipError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -251,13 +254,31 @@ function PolicySettings({ agentId }: { agentId: string }) {
     });
   };
 
-  const addListItem = (field: 'allowedAssets' | 'allowedDestinations' | 'allowedContractIds', value: string) => {
-    if (!value.trim()) return;
+  const addListItem = (field: 'allowedAssets' | 'allowedDestinations' | 'allowedContractIds', value: string): boolean => {
+    const trimmed = value.trim();
+    if (!trimmed) return false;
+    if (field === 'allowedDestinations') {
+      const addrErr = validateStellarAddressField(trimmed, 'Destination address');
+      if (addrErr) {
+        setDestinationChipError(addrErr);
+        return false;
+      }
+      setDestinationChipError(null);
+    }
+    if (field === 'allowedAssets') {
+      const assetErr = validateAssetCodeField(trimmed, 'Allowed asset code');
+      if (assetErr) {
+        setAssetChipError(assetErr);
+        return false;
+      }
+      setAssetChipError(null);
+    }
     setForm((prev) => {
       if (!prev) return prev;
-      if (prev[field].includes(value.trim())) return prev;
-      return { ...prev, [field]: [...prev[field], value.trim()] };
+      if (prev[field].includes(trimmed)) return prev;
+      return { ...prev, [field]: [...prev[field], trimmed] };
     });
+    return true;
   };
 
   const removeListItem = (field: 'allowedAssets' | 'allowedDestinations' | 'allowedContractIds', value: string) => {
@@ -378,12 +399,14 @@ function PolicySettings({ agentId }: { agentId: string }) {
             onKeyDown={(e) => {
               if (e.key === 'Enter') {
                 e.preventDefault();
-                addListItem('allowedAssets', (e.target as HTMLInputElement).value);
-                (e.target as HTMLInputElement).value = '';
+                if (addListItem('allowedAssets', (e.target as HTMLInputElement).value)) {
+                  (e.target as HTMLInputElement).value = '';
+                }
               }
             }}
           />
         </div>
+        {assetChipError && <div className="field-error error" role="alert" data-testid="policy-asset-chip-error">{assetChipError}</div>}
         <small>Assets the agent is allowed to transact with.</small>
       </div>
 
@@ -406,12 +429,14 @@ function PolicySettings({ agentId }: { agentId: string }) {
             onKeyDown={(e) => {
               if (e.key === 'Enter') {
                 e.preventDefault();
-                addListItem('allowedDestinations', (e.target as HTMLInputElement).value);
-                (e.target as HTMLInputElement).value = '';
+                if (addListItem('allowedDestinations', (e.target as HTMLInputElement).value)) {
+                  (e.target as HTMLInputElement).value = '';
+                }
               }
             }}
           />
         </div>
+        {destinationChipError && <div className="field-error error" role="alert" data-testid="policy-destination-chip-error">{destinationChipError}</div>}
         <small>Optional whitelist of allowed destination addresses. Empty means any destination is allowed.</small>
       </div>
 
