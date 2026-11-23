@@ -18,7 +18,8 @@ export type ExecutionStatus =
   | "confirmed"
   | "failed"
   | "dead_letter"
-  | "cancelled";
+  | "cancelled"
+  | "requires_approval";
 
 export interface ExecutionRecord {
   id: string;
@@ -85,6 +86,7 @@ export interface ExecutionAttentionCounts {
 export interface ExecutionStore {
   record(record: ExecutionRecord): Promise<void>;
   get(id: string): Promise<ExecutionRecord | null>;
+  getByApprovalId(approvalId: string): Promise<ExecutionRecord | null>;
   getForOwner(id: string, ownerId: string): Promise<ExecutionRecord | null>;
   listDue(before: string, limit?: number): Promise<ExecutionRecord[]>;
   listByOwner(ownerId: string, limit?: number, offset?: number): Promise<ExecutionRecord[]>;
@@ -94,7 +96,7 @@ export interface ExecutionStore {
   /** Count executions grouped by status for an owner. */
   countByOwner(ownerId: string): Promise<Record<ExecutionStatus, number>>;
   /**
-   * Count executions requiring operator attention, scoped to one owner.
+   * #359: Count executions requiring operator attention, scoped to one owner.
    *
    * `stuckOlderThan` is the ISO cutoff supplied by the caller (usually
    * `new Date(Date.now() - STUCK_EXECUTION_THRESHOLD_MS).toISOString()`);
@@ -109,4 +111,5 @@ export interface ExecutionStore {
   update(id: string, patch: Partial<ExecutionRecord>): Promise<ExecutionRecord | null>;
   updateIfStatus(id: string, expectedStatus: ExecutionStatus, patch: Partial<ExecutionRecord>): Promise<ExecutionRecord | null>;
   delete(id: string): Promise<boolean>;
+  close?(): void;
 }

@@ -21,7 +21,7 @@ import { ExecutionRecoveryService } from "./execution-recovery.js";
 import { ScheduleRecoveryService } from "./schedule-recovery.js";
 import { TransactionStatusReconciler, ApprovalRecoveryService, DEFAULT_SUBMITTED_MAX_AGE_MS } from "@4evergent/stellar";
 import { AccountSequenceCoordinator } from "./account-sequence-coordinator.js";
-import type { ExecutionRecord, ExecutionStatus, ScheduleRecord } from "@4evergent/database";
+import type { ExecutionRecord, ScheduleRecord } from "@4evergent/database";
 import type { ScheduleExecutionResult } from "./schedule-execution.js";
 import {
   InMemoryActivityStore,
