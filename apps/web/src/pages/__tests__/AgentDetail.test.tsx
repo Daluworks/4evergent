@@ -254,7 +254,15 @@ describe('AgentDetail Policy Section', () => {
       expect(mockUpdatePolicy).toHaveBeenCalledTimes(1);
     });
 
-    const [, payload] = mockUpdatePolicy.mock.calls[0];
+    // CI fix (#326): under `noUncheckedIndexedAccess` (apps/web/tsconfig.json),
+    // `mock.calls[0]` is typed `any[] | undefined`, and destructuring a
+    // possibly-undefined value is TS2488. The `toHaveBeenCalledTimes(1)`
+    // guard immediately above proves the call exists at runtime; this read +
+    // `expect(...).toBeDefined()` is only there to narrow for TypeScript so
+    // the destructure below is a pure type operation.
+    const updateCall = mockUpdatePolicy.mock.calls[0];
+    expect(updateCall).toBeDefined();
+    const [, payload] = updateCall!;
     expect(payload.maxTxAmount).toEqual({ XLM: '200' });
     // Enforced value (75) is what the editor loaded; both fields must match.
     expect(payload.approvalThreshold).toBe('75');
@@ -296,7 +304,15 @@ describe('AgentDetail Policy Section', () => {
       expect(mockUpdatePolicy).toHaveBeenCalledTimes(1);
     });
 
-    const [, payload] = mockUpdatePolicy.mock.calls[0];
+    // CI fix (#326): under `noUncheckedIndexedAccess` (apps/web/tsconfig.json),
+    // `mock.calls[0]` is typed `any[] | undefined`, and destructuring a
+    // possibly-undefined value is TS2488. The `toHaveBeenCalledTimes(1)`
+    // guard immediately above proves the call exists at runtime; this read +
+    // `expect(...).toBeDefined()` is only there to narrow for TypeScript so
+    // the destructure below is a pure type operation.
+    const updateCall = mockUpdatePolicy.mock.calls[0];
+    expect(updateCall).toBeDefined();
+    const [, payload] = updateCall!;
     expect(payload.approvalThreshold).toBe('80');
     expect(payload.requireHumanApprovalForAmountAbove).toBe('80');
   });
