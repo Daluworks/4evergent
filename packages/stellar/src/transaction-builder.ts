@@ -8,6 +8,45 @@ import {
 } from "@stellar/stellar-sdk";
 import type { PaymentIntent, TrustlineIntent, AccountSettingsIntent } from "@4evergent/shared";
 
+/** Signer for setOptions. weight 0 removes the signer; >0 adds or updates it. */
+export type SetOptionsSigner =
+  | { ed25519PublicKey: string; weight: number }
+  | { sha256Hash: string | Buffer; weight: number }
+  | { preAuthTx: string | Buffer; weight: number };
+
+/** Every field is optional; omitted fields leave the account setting unchanged. */
+export interface SetOptionsParams {
+  inflationDest?: string;
+  clearFlags?: number;
+  setFlags?: number;
+  masterWeight?: number;
+  lowThreshold?: number;
+  medThreshold?: number;
+  highThreshold?: number;
+  homeDomain?: string;
+  signer?: SetOptionsSigner;
+  /** Optional memo text (truncated to 28 bytes). */
+  memo?: string;
+}
+
+const SET_OPTIONS_FIELDS = [
+  "inflationDest",
+  "clearFlags",
+  "setFlags",
+  "masterWeight",
+  "lowThreshold",
+  "medThreshold",
+  "highThreshold",
+  "homeDomain",
+  "signer",
+] as const;
+
+function assertByte(name: string, v: unknown): void {
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 0 || v > 255) {
+    throw new Error(`StellarTransactionBuilder: ${name} must be an integer between 0 and 255`);
+  }
+}
+
 export interface AssetIdentifier {
   code: string;
   issuer: string | null;
@@ -145,6 +184,67 @@ export class StellarTransactionBuilder {
     });
     builder.addMemo(Memo.text(truncateToMemo(intent.reason)));
     builder.addOperation(changeTrustOp);
+    builder.setTimeout(30);
+
+    return builder.build();
+  }
+
+  /**
+   * Builds a transaction with a single setOptions operation.
+   *
+   * Each field is optional; omitted fields leave the existing setting
+   * unchanged. An options object with no setOptions field set throws (a
+   * setOptions with no changes is a wasted fee, so it is rejected up front).
+   */
+  async buildSetOptions(
+    sourceAccount: Account,
+    options: SetOptionsParams,
+    networkPassphrase: string
+  ): Promise<Transaction> {
+    if (!options || typeof options !== "object") {
+      throw new Error("StellarTransactionBuilder: setOptions options object required");
+    }
+    const opts: Record<string, unknown> = {};
+    for (const key of SET_OPTIONS_FIELDS) {
+      if (options[key] !== undefined) opts[key] = options[key];
+    }
+    if (Object.keys(opts).length === 0) {
+      throw new Error("StellarTransactionBuilder: setOptions requires at least one option to change");
+    }
+
+    for (const k of ["clearFlags", "setFlags", "masterWeight", "lowThreshold", "medThreshold", "highThreshold"] as const) {
+      if (options[k] !== undefined) assertByte(k, options[k]);
+    }
+    if (options.homeDomain !== undefined) {
+      if (typeof options.homeDomain !== "string" || new TextEncoder().encode(options.homeDomain).length > 32) {
+        throw new Error("StellarTransactionBuilder: homeDomain must be a string of at most 32 bytes");
+      }
+    }
+    if (options.inflationDest !== undefined) {
+      if (typeof options.inflationDest !== "string" || !options.inflationDest.startsWith("G") || options.inflationDest.length !== 56) {
+        throw new Error("StellarTransactionBuilder: inflationDest must be a valid Stellar address (G...)");
+      }
+    }
+    if (options.signer !== undefined) {
+      const sg = options.signer as unknown as Record<string, unknown>;
+      if (typeof sg !== "object" || sg === null) {
+        throw new Error("StellarTransactionBuilder: signer must be an object with a key and weight");
+      }
+      assertByte("signer.weight", sg.weight);
+      const keys = ["ed25519PublicKey", "sha256Hash", "preAuthTx"].filter((k) => sg[k] !== undefined);
+      if (keys.length !== 1) {
+        throw new Error("StellarTransactionBuilder: signer needs exactly one of ed25519PublicKey, sha256Hash, preAuthTx");
+      }
+    }
+
+    const setOptionsOp = Operation.setOptions(opts as any);
+
+    const builder = new TransactionBuilder(sourceAccount, {
+      networkPassphrase,
+      fee: this.baseFeeStroops,
+    });
+    if (options.memo) builder.addMemo(Memo.text(truncateToMemo(options.memo)));
+    builder.addOperation(setOptionsOp);
     builder.setTimeout(30);
 
     return builder.build();
