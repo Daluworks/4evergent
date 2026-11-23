@@ -87,6 +87,7 @@ async function startLifecycleHarness(opts: HarnessOptions) {
     intervalMs: 600_000,
     clock,
     activityStore,
+    approvalStore,
   });
 
   const defaultExecute = async (record: ExecutionRecord): Promise<ExecutionResult> => ({
