@@ -392,6 +392,8 @@ async function main() {
           ? Number(process.env.SCHEDULER_MAX_LATENESS_MS)
           : 5 * 60_000,
       },
+      // #109: Idempotency-Key replay window, in seconds (default 86400 = 24h).
+      idempotencyKeyWindowMs: (envPositiveInt(process.env.IDEMPOTENCY_KEY_WINDOW_SECONDS) ?? 86_400) * 1000,
       retention: {
         enabled: process.env.DATA_RETENTION_ENABLED !== "0",
         intervalMs: parseRetentionInterval(process.env.DATA_RETENTION_INTERVAL_MS, 24 * 60 * 60_000),

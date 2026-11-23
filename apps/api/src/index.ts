@@ -59,6 +59,7 @@ import {
   clampOffset,
   getSharedConnection,
   getSchemaVersion,
+  resolveIdempotencyWindowMs,
 } from "@4evergent/database";
 import type { PolicyRules, Agent, RequestContext, AuthorizationService, AuthProvider, AuthenticatedPrincipal } from "@4evergent/shared";
 import { createAuthModule, type PrincipalResolution } from "./auth.js";
@@ -179,6 +180,12 @@ export interface ServerOptions {
   };
   /** User authentication module (sessions: email / Google / Stellar wallet). */
   authModule?: ReturnType<typeof createAuthModule>;
+  /**
+   * #109: Idempotency-Key replay window in ms (default 24 hours). Applies to
+   * the activity store this server creates; an injected `activityStore`
+   * keeps its own window. Also bounds the retention sweep's key release.
+   */
+  idempotencyKeyWindowMs?: number;
   /** Periodic cleanup of expired browser sessions and old daily-spending reservations. */
   retention?: {
     enabled?: boolean;
@@ -209,7 +216,9 @@ export interface ServerOptions {
 export async function createApiServer(options: ServerOptions) {
   const store: ActivityStore =
     options.activityStore ??
-    (options.dbPath ? new SQLiteActivityStore(options.dbPath) : new InMemoryActivityStore());
+    (options.dbPath
+      ? new SQLiteActivityStore(options.dbPath, { idempotencyWindowMs: options.idempotencyKeyWindowMs })
+      : new InMemoryActivityStore({ idempotencyWindowMs: options.idempotencyKeyWindowMs }));
   const approvals: ApprovalStore =
     options.approvalStore ??
     (options.dbPath ? new SQLiteApprovalStore(options.dbPath) : new InMemoryApprovalStore());
@@ -923,6 +932,8 @@ export async function createApiServer(options: ServerOptions) {
           now: Date.now(),
           authSessionDays: sessionDays,
           dailySpendingDays: spendingDays,
+          idempotencyWindowMs: (store as { idempotencyWindowMs?: number }).idempotencyWindowMs
+            ?? resolveIdempotencyWindowMs(options.idempotencyKeyWindowMs),
           batchSize: 500,
           onApprovalExpired: async (approval) => {
             await releaseDecisionReservation(approval.agentId, approval.policyDecision);
@@ -937,7 +948,7 @@ export async function createApiServer(options: ServerOptions) {
             }
           },
         });
-        console.log(`[retention] sweep complete: auth_sessions=${result.authSessionsRemoved}, daily_spending=${result.dailySpendingRemoved}, expired_approvals=${result.expiredApprovalsSwept}`);
+        console.log(`[retention] sweep complete: auth_sessions=${result.authSessionsRemoved}, daily_spending=${result.dailySpendingRemoved}, expired_approvals=${result.expiredApprovalsSwept}, idempotency_keys_released=${result.idempotencyKeysReleased}`);
       } catch (err) {
         console.error("[retention] sweep failed:", err);
       } finally {
