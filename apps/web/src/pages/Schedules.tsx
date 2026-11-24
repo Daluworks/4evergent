@@ -124,7 +124,9 @@ export default function Schedules() {
                   </Link>
                 </td>
                 <td>
-                  <AgentName agentId={s.agentId} agentNames={agentNames} />
+                  <Link to={`/agents/${encodeURIComponent(s.agentId)}`}>
+                    <AgentName agentId={s.agentId} agentNames={agentNames} />
+                  </Link>
                 </td>
                 <td>
                   <div>{s.intent.type}</div>
