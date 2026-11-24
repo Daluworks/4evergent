@@ -4,7 +4,7 @@ import { Keypair } from "@stellar/stellar-sdk";
 import { clearAgents } from "../src/index.js";
 import { API_ERRORS } from "../src/error-codes.js";
 import { InMemoryExecutionStore, InMemoryAgentStore } from "@4evergent/database";
-import { startServer, apiFetch } from "./helpers.js";
+import { apiFetch } from "./helpers.js";
 
 beforeEach(() => {
   clearAgents();
