@@ -1060,6 +1060,7 @@ export async function createApiServer(options: ServerOptions) {
       };
     }
 
+    try {
     // Phase 28U: USER AUTH routes (/auth/*) — handled before the auth gate.
     // These are the login/session endpoints (register, login, challenge,
     // verify, google start/callback, logout, me, config).
@@ -1073,8 +1074,8 @@ export async function createApiServer(options: ServerOptions) {
     const requestScopedCtx = principalToContext(resolution.principal);
     ownerId = requestScopedCtx.ownerId;
 
-    return runRequestIdContext(requestId, () => {
-    return als.run(requestScopedCtx, () => {
+    await runRequestIdContext(requestId, async () => {
+    return await als.run(requestScopedCtx, async () => {
       // Health check is public
       if (method === "GET" && url === "/health") {
         const schemaVersion = options.dbPath
@@ -1213,6 +1214,20 @@ export async function createApiServer(options: ServerOptions) {
     apiError(res, "NOT_FOUND");
     }); // End als.run
     }); // End runRequestIdContext
+    } catch (err: unknown) {
+      log("error", "unhandled request error", {
+        requestId,
+        method,
+        path: new URL(url, "http://localhost").pathname,
+        ownerId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      if (!res.headersSent && !res.writableEnded) {
+        apiError(res, "INTERNAL_ERROR");
+      } else if (!res.writableEnded) {
+        res.end();
+      }
+    }
   });
 
   async function handleListAgents(ctx: RequestContext, req: any, res: any) {
@@ -2408,7 +2423,16 @@ export async function createApiServer(options: ServerOptions) {
           createdAt: now,
           updatedAt: now,
         };
-        void executionQueue.enqueue(executionRecord);
+        try {
+          await executionQueue.enqueue(executionRecord);
+        } catch (err: unknown) {
+          log("error", "failed to enqueue approved execution", {
+            approvalId,
+            activityId: approval.activityId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          return apiError(res, "INTERNAL_ERROR");
+        }
       }
     } else {
       // Fallback: Phase 8 fire-and-forget behavior
