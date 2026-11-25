@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
-import { Card, Skeleton, EmptyState, StatusBadge, Section } from '../components';
+import { buildAgentNameMap } from '../agentNames';
+import { AgentName, Card, Skeleton, EmptyState, StatusBadge, Section } from '../components';
 import type { AgentRecord, ActivityRecord, ApprovalRecord } from '../types';
 
 interface AttentionCounts {
@@ -164,6 +165,7 @@ export default function Overview() {
 
   const recentActivity = activity.slice(0, 10);
   const hasRecentActivity = recentActivity.length > 0;
+  const agentNames = buildAgentNameMap(agents);
 
   return (
     <section>
@@ -259,30 +261,23 @@ export default function Overview() {
 
       {(hasRecentActivity || activityError) && (
         <Section title="Recent Activity">
-          {activityError ? (
-            <div className="error-banner" role="alert">
-              <span>{activityError}</span>
-              <button type="button" className="btn btn-ghost btn-sm" onClick={retryActivity}>Retry</button>
-            </div>
-          ) : (
-            <div className="table-wrapper">
-              <table className="table">
-                <thead>
-                  <tr><th>Activity</th><th>Agent</th><th>Status</th><th>Time</th></tr>
-                </thead>
-                <tbody>
-                  {recentActivity.map((a) => (
-                    <tr key={a.id}>
-                      <td><code>{a.id.slice(0, 8)}</code></td>
-                      <td><code>{a.agentId.slice(0, 8)}</code></td>
-                      <td><StatusBadge status={a.status} /></td>
-                      <td className="muted">{new Date(a.createdAt).toLocaleString()}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+          <div className="table-wrapper">
+            <table className="table">
+              <thead>
+                <tr><th>Activity</th><th>Agent</th><th>Status</th><th>Time</th></tr>
+              </thead>
+              <tbody>
+                {recentActivity.map((a) => (
+                  <tr key={a.id}>
+                    <td><code>{a.id.slice(0, 8)}</code></td>
+                    <td><AgentName agentId={a.agentId} agentNames={agentNames} /></td>
+                    <td><StatusBadge status={a.status} /></td>
+                    <td className="muted">{new Date(a.createdAt).toLocaleString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </Section>
       )}
     </section>
