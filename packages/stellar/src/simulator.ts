@@ -125,24 +125,61 @@ export class StellarSimulator {
       );
     }
 
-    // 6. Balance precondition for XLM payments.
+    // 6. Balance precondition for payments (native XLM and issued assets).
     const warnings: string[] = [];
-    const xlmBalance = (account.balances as { asset_type: string; balance: string }[]).find(
-      (b) => b.asset_type === "native"
-    );
-    if (xlmBalance) {
-      const payment = paymentAmount(transaction);
-      const totalCost = payment + Number(transaction.fee) / 1e7;
-      const available = Number(xlmBalance.balance) - reserveFor(account);
-      if (totalCost > available) {
+    const balances = (account.balances ?? []) as {
+      asset_type: string;
+      asset_code?: string;
+      asset_issuer?: string;
+      balance: string;
+    }[];
+    const xlmBalance = balances.find((b) => b.asset_type === "native");
+    const payment = paymentAmount(transaction);
+    const feeXlm = Number(transaction.fee) / 1e7;
+
+    if (payment.isNative) {
+      if (xlmBalance) {
+        const totalCost = payment.amount + feeXlm;
+        const available = Number(xlmBalance.balance) - reserveFor(account);
+        if (totalCost > available) {
+          return fail(
+            transaction.fee,
+            ops,
+            `Insufficient balance: payment ${payment.amount} XLM + fee exceeds available ${available.toFixed(7)} XLM`
+          );
+        }
+        if (available - totalCost < 1) {
+          warnings.push("Remaining balance after transaction is under 1 XLM");
+        }
+      }
+    } else {
+      // Non-native payment: XLM balance still covers transaction fee + minimum reserve.
+      const availableXlm = (xlmBalance ? Number(xlmBalance.balance) : 0) - reserveFor(account);
+      if (feeXlm > availableXlm) {
         return fail(
           transaction.fee,
           ops,
-          `Insufficient balance: payment ${payment} XLM + fee exceeds available ${available.toFixed(7)} XLM`
+          `Insufficient XLM balance for fee: fee ${feeXlm.toFixed(7)} XLM exceeds available ${availableXlm.toFixed(7)} XLM`
         );
       }
-      if (available - totalCost < 1) {
+      if (xlmBalance && availableXlm - feeXlm < 1) {
         warnings.push("Remaining balance after transaction is under 1 XLM");
+      }
+
+      // Check the payment asset's own trustline balance on the source account.
+      const assetBalance = balances.find(
+        (b) =>
+          (b.asset_type === "credit_alphanum4" || b.asset_type === "credit_alphanum12") &&
+          b.asset_code === payment.assetCode &&
+          b.asset_issuer === payment.assetIssuer
+      );
+      const availableAsset = assetBalance ? Number(assetBalance.balance) : 0;
+      if (!assetBalance || payment.amount > availableAsset) {
+        return fail(
+          transaction.fee,
+          ops,
+          `Insufficient balance: payment ${payment.amount} ${payment.assetCode} exceeds available ${availableAsset.toFixed(7)} ${payment.assetCode}`
+        );
       }
     }
 
@@ -267,13 +304,32 @@ function fail(fee: string, operations: number, error: string): SimulationResult 
   return { success: false, fee, operations, warnings: [], error };
 }
 
-function paymentAmount(transaction: Transaction): number {
+export interface PaymentAmountInfo {
+  amount: number;
+  isNative: boolean;
+  assetCode: string;
+  assetIssuer: string | null;
+}
+
+export function paymentAmount(transaction: Transaction): PaymentAmountInfo {
   for (const op of transaction.operations) {
     if (op.type === "payment") {
-      return Number(op.amount);
+      const asset = op.asset as Asset;
+      const isNative = typeof asset?.isNative === "function" ? asset.isNative() : true;
+      return {
+        amount: Number(op.amount),
+        isNative,
+        assetCode: isNative ? "XLM" : asset.code,
+        assetIssuer: isNative ? null : asset.issuer,
+      };
     }
   }
-  return 0;
+  return {
+    amount: 0,
+    isNative: true,
+    assetCode: "XLM",
+    assetIssuer: null,
+  };
 }
 
 function reserveFor(account: any): number {
