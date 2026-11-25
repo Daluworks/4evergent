@@ -1795,6 +1795,25 @@ export async function createApiServer(options: ServerOptions) {
       return apiError(res, "VALIDATION_ERROR", { message: exprValidation.error });
     }
 
+    // Issue #368: check agent status and evaluate policy at schedule creation time
+    // without reserving daily spending (creation is not a spend).
+    const agent = (await agentStore.get(agentId)) ?? agents.get(agentId);
+    if (!agent) return apiError(res, "AGENT_NOT_FOUND");
+    if (agent.status !== "active") {
+      return apiError(res, "AGENT_NOT_ACTIVE", {
+        message: `agent is ${agent.status}; cannot create schedule for non-active agent`,
+      });
+    }
+
+    const decision = await policy.evaluate(intent, agentId, { skipReservation: true });
+    if (decision.result === "deny") {
+      return apiError(res, "POLICY_DENIED", {
+        message: `Schedule intent denied by policy (${decision.rule}): ${decision.reason}`,
+        details: { rule: decision.rule, reason: decision.reason },
+        extra: { policyDecision: decision },
+      });
+    }
+
     const now = new Date().toISOString();
     const schedule = await schedules.create({
       id: crypto.randomUUID(),
@@ -1810,6 +1829,18 @@ export async function createApiServer(options: ServerOptions) {
       createdAt: now,
       updatedAt: now,
     });
+
+    if (decision.result === "requires_approval") {
+      return json(
+        res,
+        {
+          schedule,
+          policyDecision: decision,
+          warning: `Each scheduled run will require human approval (${decision.rule}: ${decision.reason})`,
+        },
+        201
+      );
+    }
 
     return json(res, { schedule }, 201);
   }
